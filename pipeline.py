@@ -1165,36 +1165,37 @@ class VehicleALPRPipeline:
                             cv2.LINE_AA,
                         )
 
-        # Draw HUD Live Statistics Dashboard (Top-Left)
-        u_cnt, p_cnt, np_cnt, act_cnt, small_cnt = self.tracker_manager.get_counts()
-        lines = [
-            f"CAMERA: {self.config.camera_id} | FPS: {live_fps:.1f}",
-            f"Total Unique Vehicles: {u_cnt}",
-            f"Vehicles With Plate:   {p_cnt}",
-            f"Vehicles Without Plate:{np_cnt}",
-            f"Ignored Horizon Cars:  {small_cnt}",
-            f"Current Active:        {act_cnt}",
-        ]
+        # Draw HUD Live Statistics Dashboard (Top-Left) only if enabled
+        if getattr(self.config, "show_hud_stats", False):
+            u_cnt, p_cnt, np_cnt, act_cnt, small_cnt = self.tracker_manager.get_counts()
+            lines = [
+                f"CAMERA: {self.config.camera_id} | FPS: {live_fps:.1f}",
+                f"Total Unique Vehicles: {u_cnt}",
+                f"Vehicles With Plate:   {p_cnt}",
+                f"Vehicles Without Plate:{np_cnt}",
+                f"Ignored Horizon Cars:  {small_cnt}",
+                f"Current Active:        {act_cnt}",
+            ]
 
-        hud_w = 340
-        hud_h = 24 * len(lines) + 16
-        overlay = annotated.copy()
-        cv2.rectangle(overlay, (10, 10), (10 + hud_w, 10 + hud_h), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.75, annotated, 0.25, 0, annotated)
-        cv2.rectangle(annotated, (10, 10), (10 + hud_w, 10 + hud_h), (255, 255, 255), 1)
+            hud_w = 340
+            hud_h = 24 * len(lines) + 16
+            overlay = annotated.copy()
+            cv2.rectangle(overlay, (10, 10), (10 + hud_w, 10 + hud_h), (20, 20, 20), -1)
+            cv2.addWeighted(overlay, 0.75, annotated, 0.25, 0, annotated)
+            cv2.rectangle(annotated, (10, 10), (10 + hud_w, 10 + hud_h), (255, 255, 255), 1)
 
-        y_offset = 32
-        for line in lines:
-            cv2.putText(
-                annotated,
-                line,
-                (20, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-            y_offset += 24
+            y_offset = 32
+            for line in lines:
+                cv2.putText(
+                    annotated,
+                    line,
+                    (20, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                y_offset += 24
 
         return annotated

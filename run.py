@@ -260,6 +260,12 @@ def parse_args():
         default=False,
         help="Continuously loop the input video stream (infinite 24/7 CCTV simulation).",
     )
+    parser.add_argument(
+        "--show-hud-stats",
+        action="store_true",
+        default=False,
+        help="Show top-left statistics dashboard overlay (default: False for clean tracking).",
+    )
     return parser.parse_args()
 
 
@@ -312,6 +318,7 @@ def main():
         include_remarks=args.include_remarks,
         box_smoothing_factor=args.box_smoothing,
         hud_box_smoothing_factor=args.hud_smoothing,
+        show_hud_stats=args.show_hud_stats,
         debug_reads=args.debug_reads,
         draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,

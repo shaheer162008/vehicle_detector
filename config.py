@@ -97,6 +97,7 @@ class PipelineConfig:
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
     box_smoothing_factor: float = 0.0         # 0.0 for raw detector boxes (zero lag on ALPR & vehicle snapshots)
     hud_box_smoothing_factor: float = 0.65    # Smoothing factor for HUD video visualization only
+    show_hud_stats: bool = False              # Show/hide HUD top-left statistics dashboard overlay
     include_remarks: bool = False             # Set True only if remarks field is requested
     print_events_to_terminal: bool = False    # Set True to print event JSON on console
     debug_reads: bool = False                 # Set True to print verbose per-read OCR confidences
