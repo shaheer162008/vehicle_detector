@@ -47,9 +47,9 @@ class ColabLivePreviewWorker:
 
     def _init_display(self) -> None:
         try:
-            from IPython.display import Image, display
+            from IPython.display import Image, display, HTML
 
-            self.display_handle = display(None, display_id=True)
+            self.display_handle = display(HTML("<div><b>[FastALPR] Initializing Real-Time Live Preview...</b></div>"), display_id=True)
             self._has_ipython = True
         except Exception:
             self._has_ipython = False
