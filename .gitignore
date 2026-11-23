@@ -231,6 +231,8 @@ frame_test.png
 results.gif
 *.tmp
 CPK NZ*
+# Ensure demo video is tracked – unignore any stream/*.mp4 that may have been ignored earlier
+!stream/*.mp4
 
 
 
