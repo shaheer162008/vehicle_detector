@@ -228,3 +228,7 @@ output_prev_*/
 *.onnx
 *.bak*
 frame_test.png
+results.gif
+*.tmp
+CPK NZ*
+

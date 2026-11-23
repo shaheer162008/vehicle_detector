@@ -366,10 +366,31 @@ class VehicleALPRPipeline:
             print(f"[OUTPUT] Writing video at {fps:.1f} FPS to: {raw_output_path.resolve()}")
 
         if self.config.show_preview:
-            self.preview_worker = DesktopPreviewWorker(
-                max_w=self.config.preview_max_width,
-                max_h=self.config.preview_max_height,
-            )
+            # Auto-detect Colab / headless notebook environment vs local Desktop GUI
+            is_colab = False
+            try:
+                import google.colab  # noqa: F401
+                is_colab = True
+            except ImportError:
+                try:
+                    from IPython import get_ipython
+                    ip = get_ipython()
+                    if ip is not None and "google.colab" in str(ip):
+                        is_colab = True
+                except Exception:
+                    pass
+
+            if is_colab:
+                self.preview_worker = ColabLivePreviewWorker(
+                    max_w=self.config.preview_max_width,
+                    max_h=self.config.preview_max_height,
+                    jpeg_quality=self.config.preview_jpeg_quality,
+                )
+            else:
+                self.preview_worker = DesktopPreviewWorker(
+                    max_w=self.config.preview_max_width,
+                    max_h=self.config.preview_max_height,
+                )
             self.preview_worker.start()
 
         frame_idx = 0
