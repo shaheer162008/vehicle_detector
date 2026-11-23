@@ -94,7 +94,7 @@ echo [INFO] Live preview window will open. Press 'q' or ESC in window to exit.
 echo [INFO] Output video is simultaneously recorded to: %OUTPUT_VIDEO%
 echo.
 
-"%PYTHON%" run.py --source "!STREAM_URL!" --plate-format "!PLATE_FORMAT!" --output-video "!OUTPUT_VIDEO!" --preview
+"%PYTHON%" run.py --source "!STREAM_URL!" --plate-format "!PLATE_FORMAT!" --output-video "!OUTPUT_VIDEO!" --no-preview
 
 set "RUN_EXIT_CODE=%errorlevel%"
 
