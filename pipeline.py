@@ -406,8 +406,13 @@ class VehicleALPRPipeline:
             cap = cv2.VideoCapture(src_str, cv2.CAP_FFMPEG)
         else:
             video_path = Path(video_source)
+            if not video_path.exists() and (REPO_ROOT / video_path).exists():
+                video_path = REPO_ROOT / video_path
             if not video_path.exists():
-                raise FileNotFoundError(f"Input video file not found: {video_path.resolve()}")
+                raise FileNotFoundError(
+                    f"Input video file not found at: {video_path.resolve()}.\n"
+                    f"Make sure to run '!git pull origin main' to download stream/stream.mp4"
+                )
             if simulate_camera:
                 print(f"[INPUT] Simulating live camera feed at native FPS from: {video_path.name}")
                 cap = RealtimeCameraCapture(str(video_path), loop=loop_stream)

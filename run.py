@@ -373,9 +373,16 @@ def main():
     except KeyboardInterrupt:
         print("\n[INFO] User interrupted pipeline. Finalizing and saving outputs...")
     except Exception as e:
-        print(f"[FATAL ERROR] Pipeline crashed with error: {e}")
+        print(f"\n[FATAL ERROR] Pipeline crashed with error: {e}")
         import traceback
         traceback.print_exc()
+        # In IPython / Colab %run, calling sys.exit raises SystemExit which crashes IPython's traceback handler
+        try:
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                return
+        except Exception:
+            pass
         sys.exit(1)
 
 
