@@ -202,8 +202,12 @@ class RealtimeCameraCapture:
                 time.sleep(sleep_time)
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
-        if self.latest_frame is None and not self.is_eof:
-            time.sleep(self.frame_interval / 2)
+        # Block until reader thread delivers at least one frame (avoids Colab threading race)
+        deadline = time.perf_counter() + 5.0
+        while self.latest_frame is None and not self.is_eof:
+            if time.perf_counter() > deadline:
+                break
+            time.sleep(0.005)
         with self.lock:
             if self.latest_frame is not None:
                 return True, self.latest_frame.copy()
