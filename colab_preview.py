@@ -1,37 +1,30 @@
 """Colab preview script for FastALPR.
 
-Usage in a Colab notebook (after installing dependencies):
+Usage (run after dependencies are installed):
 
-```python
 %run colab_preview.py \
     --source "" \
     --simulate-camera \
     --loop-stream \
-    --max-frames 300  # optional, limit to avoid infinite loop
-```
-
-If `--source` is empty the script will automatically locate or download the demo video
-(`stream/stream.mp4`). The video is processed frame‑by‑frame and each annotated frame
-is displayed inline using IPython's `display` utilities, which works in headless
-environments like Colab. The script respects `--max-frames` (default = 500) to
-prevent endless execution; omit it to run indefinitely (use with care).
+    --max-frames 300   # optional; set 0 for unlimited loop
+    --save-output       # optional, write annotated video to output/annotated_output.mp4
 """
 
-import argparse, os, sys
+import argparse, os, sys, time
 from pathlib import Path
-from IPython.display import display, clear_output, Image
+from IPython.display import display, clear_output, Video, Image
 import cv2
-import time
 
-# Import the pipeline class from the repo
+# ----------------------------------------------------------------------
+# Adjust imports to match the repository layout.
+# ----------------------------------------------------------------------
 sys.path.append(str(Path(__file__).resolve().parent))
-from fast_alpr.alpr import VehicleALPRPipeline  # adjust import if needed
-from config import PipelineConfig, load_camera_from_json  # placeholder, adapt as repo defines
+# NOTE: If the import path differs, replace the line below with the correct one.
+from fast_alpr.alpr import VehicleALPRPipeline   # <-- may be fast_alpr.alpr or fast_alpr.pipeline
+from config import PipelineConfig                # <-- adjust if your config class lives elsewhere
 
-def download_demo_video():
-    """Download the demo video if it does not exist.
-    Returns the path to the video file.
-    """
+def download_demo_video() -> str:
+    """Download the demo video if it does not exist and return its path."""
     target = Path("stream/stream.mp4")
     if target.exists():
         return str(target)
@@ -39,7 +32,7 @@ def download_demo_video():
     try:
         import urllib.request
         target.parent.mkdir(parents=True, exist_ok=True)
-        print(f"[DOWNLOAD] Fetching demo video …")
+        print("[DOWNLOAD] Fetching demo video …")
         urllib.request.urlretrieve(url, str(target))
         print(f"[INFO] Demo video saved to {target}")
     except Exception as e:
@@ -47,26 +40,31 @@ def download_demo_video():
         sys.exit(1)
     return str(target)
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="FastALPR video preview for Colab")
     parser.add_argument("--source", type=str, default="", help="Path to video file (empty => auto)")
-    parser.add_argument("--simulate-camera", action="store_true", help="Treat video as live camera feed")
+    parser.add_argument("--simulate-camera", action="store_true",
+                        help="Treat the video as a live camera feed (keeps timestamps)")
     parser.add_argument("--loop-stream", action="store_true", help="Loop the video indefinitely")
-    parser.add_argument("--max-frames", type=int, default=500, help="Maximum frames to display (0 = unlimited)")
+    parser.add_argument("--max-frames", type=int, default=500,
+                        help="Maximum frames to display (0 = unlimited)")
+    parser.add_argument("--save-output", action="store_true",
+                        help="Write annotated video to output/annotated_output.mp4")
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
     video_source = args.source or download_demo_video()
 
-    # Build a minimal config – the repository already provides utilities to load config from JSON.
-    # Here we use default values; adjust if your repo expects more.
+    # ------------------------------------------------------------------
+    # Build the pipeline – you can tweak any config values here.
+    # ------------------------------------------------------------------
     config = PipelineConfig()
     pipeline = VehicleALPRPipeline(config=config)
 
-    # Open video capture (simulate camera if requested)
+    # ------------------------------------------------------------------
+    # Open the video source
+    # ------------------------------------------------------------------
     if args.simulate_camera:
         from pipeline import RealtimeCameraCapture
         cap = RealtimeCameraCapture(video_source, loop=args.loop_stream)
@@ -77,30 +75,53 @@ def main():
         print(f"[ERROR] Could not open video source: {video_source}")
         return
 
+    # Prepare writer if we need to save the annotated output
+    writer = None
+    out_path = None
+    if args.save_output:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        out_path = Path("output/annotated_output.mp4")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
+        print(f"[INFO] Saving annotated video to {out_path}")
+
     frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        # Run ALPR on the current frame
-        results = pipeline.process_frame(frame)  # assuming a helper method exists; otherwise use pipeline directly
-        # Draw annotations (the pipeline has a draw method; we call it if present)
+
+        # Run ALPR on the current frame (draw_predictions if available)
         if hasattr(pipeline, "draw_predictions"):
             annotated = pipeline.draw_predictions(frame).image
         else:
             annotated = frame
-        # Encode as JPEG for inline display
+
+        # Write to file if requested
+        if writer:
+            writer.write(annotated)
+
+        # Inline display
         _, jpeg = cv2.imencode('.jpg', annotated)
         display(Image(data=jpeg.tobytes()))
         clear_output(wait=True)
+
         frame_idx += 1
         if args.max_frames and frame_idx >= args.max_frames:
             break
-        # Small sleep to mimic real‑time playback (adjust as needed)
         time.sleep(0.03)
+
     cap.release()
-    print("[INFO] Preview finished (displayed {} frames).".format(frame_idx))
+    if writer:
+        writer.release()
+        # Show saved video inline after processing
+        print("[INFO] Playback of saved video:")
+        display(Video(str(out_path), embed=True, width=640, height=360))
+
+    print(f"[INFO] Preview finished – displayed {frame_idx} frames.")
 
 if __name__ == "__main__":
     main()
-"
