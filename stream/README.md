@@ -34,3 +34,4 @@ Stream is broadcast at: `http://127.0.0.1:8554/live`
 python run.py --source http://127.0.0.1:8554/live --plate-format PAKISTAN
 ```
 This tests real network stream latency, dropped frames, and true real-time throughput identically to a physical IP camera!
+

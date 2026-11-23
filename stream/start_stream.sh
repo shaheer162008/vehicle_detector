@@ -9,3 +9,4 @@ fi
 
 echo "=== Starting FastALPR Live Camera Stream Broadcaster ==="
 $PYTHON stream/live_stream.py --video "stream/stream.mp4" --port 8554
+
