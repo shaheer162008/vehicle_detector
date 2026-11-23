@@ -545,6 +545,7 @@ class TrackState:
     # Plate box visualization in video (Part B)
     last_plate_box_frame: Optional[List[float]] = None
     last_plate_box_frame_idx: int = -1
+    plate_rel_box: Optional[List[float]] = None
     kalman_box: Optional[List[float]] = None
 
 
@@ -577,7 +578,7 @@ class VehicleTrackerManager:
         if self.config.events_jsonl_path.exists():
             with open(self.config.events_jsonl_path, "w", encoding="utf-8") as _:
                 pass
-        if self.config.collect_plate_data and self.config.plate_reads_jsonl_path.exists():
+        if getattr(self.config, "debug_outputs", False) and self.config.collect_plate_data and self.config.plate_reads_jsonl_path.exists():
             with open(self.config.plate_reads_jsonl_path, "w", encoding="utf-8") as _:
                 pass
 
@@ -845,6 +846,18 @@ class VehicleTrackerManager:
         if plate_bbox_frame is not None:
             track.last_plate_box_frame = [float(v) for v in plate_bbox_frame]
             track.last_plate_box_frame_idx = frame_idx
+            vbox = track.frame_boxes.get(frame_idx) or track.raw_box or track.smoothed_box
+            if vbox is not None:
+                vx1, vy1, vx2, vy2 = vbox
+                vw = max(1.0, vx2 - vx1)
+                vh = max(1.0, vy2 - vy1)
+                px1, py1, px2, py2 = plate_bbox_frame
+                track.plate_rel_box = [
+                    (px1 - vx1) / vw,
+                    (py1 - vy1) / vh,
+                    (px2 - vx1) / vw,
+                    (py2 - vy1) / vh,
+                ]
 
         raw_str = str(raw_text).strip().upper()
         if per_char_confs is None or len(per_char_confs) != len(raw_str):
@@ -1157,6 +1170,8 @@ class VehicleTrackerManager:
             ):
                 survivor.last_plate_box_frame = absorbed.last_plate_box_frame
                 survivor.last_plate_box_frame_idx = absorbed.last_plate_box_frame_idx
+                if getattr(absorbed, "plate_rel_box", None) is not None:
+                    survivor.plate_rel_box = absorbed.plate_rel_box
 
         # Plate lock: preserve locked plate on survivor or absorbed
         if survivor.plate_confident_reached and survivor.best_plate_text:
@@ -1234,7 +1249,8 @@ class VehicleTrackerManager:
         Flushes collected OCR reads for this track to output/plate_reads.jsonl.
         Saves up to 5 best crops (by score = confidence * plate_w) to output/plate_crops/.
         """
-        if not self.config.collect_plate_data or track.plate_reads_flushed:
+        if not getattr(self.config, "debug_outputs", False) or not self.config.collect_plate_data or track.plate_reads_flushed:
+            track.plate_reads_flushed = True
             return
 
         if not track.all_plate_reads:
@@ -1484,48 +1500,49 @@ class VehicleTrackerManager:
             f"Raw Box={raw_box_display}"
         )
 
-        # Context Full Frame with Annotation
-        context_filename = f"context_{event_id}.png"
-        context_save_path = self.config.snapshots_dir / context_filename
-        if track.best_full_frame is not None and track.best_raw_box is not None:
-            annotated_context = track.best_full_frame.copy()
-            h_f, w_f = annotated_context.shape[:2]
-            vx1, vy1, vx2, vy2 = [int(v) for v in track.best_raw_box]
-            vx1, vy1 = max(0, vx1), max(0, vy1)
-            vx2, vy2 = min(w_f, vx2), min(h_f, vy2)
+        # Context Full Frame with Annotation (only in debug-outputs mode)
+        if getattr(self.config, "debug_outputs", False):
+            context_filename = f"context_{event_id}.png"
+            context_save_path = self.config.snapshots_dir / context_filename
+            if track.best_full_frame is not None and track.best_raw_box is not None:
+                annotated_context = track.best_full_frame.copy()
+                h_f, w_f = annotated_context.shape[:2]
+                vx1, vy1, vx2, vy2 = [int(v) for v in track.best_raw_box]
+                vx1, vy1 = max(0, vx1), max(0, vy1)
+                vx2, vy2 = min(w_f, vx2), min(h_f, vy2)
 
-            box_color = (0, 255, 0) if has_plate else (0, 140, 255)
-            cv2.rectangle(annotated_context, (vx1, vy1), (vx2, vy2), box_color, 3)
+                box_color = (0, 255, 0) if has_plate else (0, 140, 255)
+                cv2.rectangle(annotated_context, (vx1, vy1), (vx2, vy2), box_color, 3)
 
-            label = (
-                f"{track.global_id} | {track.best_plate_text}"
-                if has_plate
-                else f"{track.global_id} | NO PLATE"
-            )
+                label = (
+                    f"{track.global_id} | {track.best_plate_text}"
+                    if has_plate
+                    else f"{track.global_id} | NO PLATE"
+                )
 
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.65
-            thickness = 2
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-            label_y = max(th + 6, vy1 - 8)
-            cv2.rectangle(
-                annotated_context,
-                (vx1, label_y - th - 6),
-                (vx1 + tw + 6, label_y + baseline + 2),
-                box_color,
-                -1,
-            )
-            cv2.putText(
-                annotated_context,
-                label,
-                (vx1 + 3, label_y),
-                font,
-                font_scale,
-                (0, 0, 0),
-                thickness,
-                cv2.LINE_AA,
-            )
-            self.snapshot_saver.submit(context_save_path, annotated_context)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.65
+                thickness = 2
+                (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+                label_y = max(th + 6, vy1 - 8)
+                cv2.rectangle(
+                    annotated_context,
+                    (vx1, label_y - th - 6),
+                    (vx1 + tw + 6, label_y + baseline + 2),
+                    box_color,
+                    -1,
+                )
+                cv2.putText(
+                    annotated_context,
+                    label,
+                    (vx1 + 3, label_y),
+                    font,
+                    font_scale,
+                    (0, 0, 0),
+                    thickness,
+                    cv2.LINE_AA,
+                )
+                self.snapshot_saver.submit(context_save_path, annotated_context)
 
         # Cropped Plate snapshot
         plate_filename: Optional[str] = None

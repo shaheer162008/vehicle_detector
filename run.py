@@ -139,6 +139,12 @@ def parse_args():
         help="Print verbose OCR reads and per-character confidences during execution.",
     )
     parser.add_argument(
+        "--debug-outputs",
+        action="store_true",
+        default=False,
+        help="Save extra debug outputs (context images, plate crops, plate reads). Default False.",
+    )
+    parser.add_argument(
         "--no-plate-boxes",
         dest="draw_plate_boxes",
         action="store_false",
@@ -282,6 +288,7 @@ def main():
         box_smoothing_factor=args.box_smoothing,
         hud_box_smoothing_factor=args.hud_smoothing,
         debug_reads=args.debug_reads,
+        debug_outputs=args.debug_outputs,
         draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,
     )

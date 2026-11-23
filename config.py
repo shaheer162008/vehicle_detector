@@ -101,6 +101,7 @@ class PipelineConfig:
     include_remarks: bool = False             # Set True only if remarks field is requested
     print_events_to_terminal: bool = False    # Set True to print event JSON on console
     debug_reads: bool = False                 # Set True to print verbose per-read OCR confidences
+    debug_outputs: bool = False               # Set True to save extra debug outputs (context images, plate crops, reads)
     draw_plate_boxes: bool = True             # Set True to draw green plate bounding boxes in annotated video
 
     # -------------------------------------------------------------
@@ -141,7 +142,7 @@ class PipelineConfig:
         self.plate_crops_dir = Path(self.plate_crops_dir)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.base_output_dir.mkdir(parents=True, exist_ok=True)
-        if self.collect_plate_data:
+        if self.debug_outputs and self.collect_plate_data:
             self.plate_crops_dir.mkdir(parents=True, exist_ok=True)
 
         fmt = self.plate_format.upper()

@@ -636,6 +636,17 @@ class VehicleALPRPipeline:
                                             if (pfx1 >= rx1 - 5) and (pfy1 >= ry1 - 5) and (pfx2 <= rx2 + 5) and (pfy2 <= ry2 + 5):
                                                 t.current_frame_candidate["plate_inside"] = True
 
+                                        if t.raw_box is not None:
+                                            rx1, ry1, rx2, ry2 = t.raw_box
+                                            rw = max(1.0, rx2 - rx1)
+                                            rh = max(1.0, ry2 - ry1)
+                                            t.plate_rel_box = [
+                                                (pfx1 - rx1) / rw,
+                                                (pfy1 - ry1) / rh,
+                                                (pfx2 - rx1) / rw,
+                                                (pfy2 - ry1) / rh,
+                                            ]
+
                                         raw_text, ocr_conf, per_char_confs = self._extract_ocr_confidences(
                                             item.ocr, plate_crop, frame_idx
                                         )
@@ -730,6 +741,34 @@ class VehicleALPRPipeline:
             t_snap_start = time.perf_counter()
             self.tracker_manager.snapshot_saver.stop()
             prof_snapshot_wait = time.perf_counter() - t_snap_start
+
+            # Safety cleanup: output/snapshots ke andar jo file kisi event se referenced nahi, delete karo
+            if not getattr(self.config, "debug_outputs", False) and self.config.snapshots_dir.exists():
+                referenced_files = set()
+                events_list = list(self.tracker_manager.emitted_events)
+                if self.config.events_json_path.exists():
+                    try:
+                        with open(self.config.events_json_path, "r", encoding="utf-8") as _ej:
+                            loaded_evs = json.load(_ej)
+                            if isinstance(loaded_evs, list):
+                                events_list.extend(loaded_evs)
+                    except Exception:
+                        pass
+
+                for ev in events_list:
+                    v_snap = ev.get("snapshot_vehicle")
+                    if v_snap:
+                        referenced_files.add(Path(v_snap).name)
+                    p_snap = ev.get("snapshot_number_plate")
+                    if p_snap:
+                        referenced_files.add(Path(p_snap).name)
+
+                for f_item in self.config.snapshots_dir.iterdir():
+                    if f_item.is_file() and f_item.name not in referenced_files:
+                        try:
+                            f_item.unlink()
+                        except Exception:
+                            pass
 
         pipeline_wall_total = time.perf_counter() - pipeline_wall_start
 
@@ -1020,53 +1059,67 @@ class VehicleALPRPipeline:
                 cv2.LINE_AA,
             )
 
-            # Draw Plate Box in Video (Part B)
-            if self.config.draw_plate_boxes and track.last_plate_box_frame is not None:
-                frame_diff = frame_idx - track.last_plate_box_frame_idx
-                # Visible for up to 6 frames after last detection (B2)
-                if 0 <= frame_diff <= 6:
-                    px1, py1, px2, py2 = [int(v) for v in track.last_plate_box_frame]
-                    px1, py1 = max(0, px1), max(0, py1)
-                    px2, py2 = min(w, px2), min(h, py2)
+            # Draw Plate Box in Video (Part B: persistent with relative projection)
+            rel_box = getattr(track, "plate_rel_box", None)
+            if rel_box is None and track.last_plate_box_frame is not None:
+                ref_vbox = track.frame_boxes.get(track.last_plate_box_frame_idx) or [x1, y1, x2, y2]
+                rx1, ry1, rx2, ry2 = ref_vbox
+                rw = max(1.0, rx2 - rx1)
+                rh = max(1.0, ry2 - ry1)
+                lpx1, lpy1, lpx2, lpy2 = track.last_plate_box_frame
+                rel_box = [
+                    (lpx1 - rx1) / rw,
+                    (lpy1 - ry1) / rh,
+                    (lpx2 - rx1) / rw,
+                    (lpy2 - ry1) / rh,
+                ]
+                track.plate_rel_box = rel_box
 
-                    # Only if plate centre lies inside vehicle box (B3)
-                    pcx = (px1 + px2) / 2.0
-                    pcy = (py1 + py2) / 2.0
-                    if x1 <= pcx <= x2 and y1 <= pcy <= y2 and px2 > px1 and py2 > py1:
-                        # Bright green (0, 255, 0), thickness 3 (B1)
-                        cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 0), 3)
+            if self.config.draw_plate_boxes and rel_box is not None:
+                vw = float(x2 - x1)
+                vh = float(y2 - y1)
+                px1 = x1 + rel_box[0] * vw
+                py1 = y1 + rel_box[1] * vh
+                px2 = x1 + rel_box[2] * vw
+                py2 = y1 + rel_box[3] * vh
+                px1, py1 = max(0, int(px1)), max(0, int(py1))
+                px2, py2 = min(w, int(px2)), min(h, int(py2))
 
-                        if track.best_plate_text:
-                            p_conf_pct = (track.best_plate_conf or 0.0) * 100.0
-                            plate_label = f"{track.best_plate_text} {p_conf_pct:.0f}%"
-                        else:
-                            plate_label = "reading..."
+                if px2 > px1 and py2 > py1:
+                    # Bright green (0, 255, 0), thickness 3 (B1)
+                    cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 0), 3)
 
-                        p_font_scale = 0.65
-                        p_thick = 2
-                        (ptw, pth), p_base = cv2.getTextSize(plate_label, font, p_font_scale, p_thick)
+                    if track.best_plate_text:
+                        p_conf_pct = (track.best_plate_conf or 0.0) * 100.0
+                        plate_label = f"{track.best_plate_text} {p_conf_pct:.0f}%"
+                    else:
+                        plate_label = "reading..."
 
-                        # Label above the plate box (below if it would leave the frame)
-                        if py1 - pth - 8 >= 0:
-                            pl_y = py1 - 4
-                            pbg_y1 = py1 - pth - 8
-                            pbg_y2 = py1
-                        else:
-                            pl_y = py2 + pth + 4
-                            pbg_y1 = py2
-                            pbg_y2 = py2 + pth + 8
+                    p_font_scale = 0.65
+                    p_thick = 2
+                    (ptw, pth), p_base = cv2.getTextSize(plate_label, font, p_font_scale, p_thick)
 
-                        cv2.rectangle(annotated, (px1, pbg_y1), (px1 + ptw + 6, pbg_y2), (0, 255, 0), -1)
-                        cv2.putText(
-                            annotated,
-                            plate_label,
-                            (px1 + 3, pl_y),
-                            font,
-                            p_font_scale,
-                            (0, 0, 0),
-                            p_thick,
-                            cv2.LINE_AA,
-                        )
+                    # Label above the plate box (below if it would leave the frame)
+                    if py1 - pth - 8 >= 0:
+                        pl_y = py1 - 4
+                        pbg_y1 = py1 - pth - 8
+                        pbg_y2 = py1
+                    else:
+                        pl_y = py2 + pth + 4
+                        pbg_y1 = py2
+                        pbg_y2 = py2 + pth + 8
+
+                    cv2.rectangle(annotated, (px1, pbg_y1), (px1 + ptw + 6, pbg_y2), (0, 255, 0), -1)
+                    cv2.putText(
+                        annotated,
+                        plate_label,
+                        (px1 + 3, pl_y),
+                        font,
+                        p_font_scale,
+                        (0, 0, 0),
+                        p_thick,
+                        cv2.LINE_AA,
+                    )
 
         # Draw HUD Live Statistics Dashboard (Top-Left)
         u_cnt, p_cnt, np_cnt, act_cnt, small_cnt = self.tracker_manager.get_counts()
