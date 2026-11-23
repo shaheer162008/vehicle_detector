@@ -32,7 +32,7 @@ class PipelineConfig:
     # 4. Enterprise Commercial License from Ultralytics
     # -------------------------------------------------------------
     vehicle_model_name: str = "yolo11m.pt"  # Medium YOLO11 model
-    vehicle_conf_thresh: float = 0.30       # Confidence threshold for vehicles
+    vehicle_conf_thresh: float = 0.20       # Confidence threshold for vehicles (lowered to catch all cars)
     vehicle_imgsz: int = 960                # Inference image size for YOLO
     vehicle_half_precision: bool = True     # Use FP16 half precision on CUDA
     # Target COCO classes: 2=car, 3=motorcycle, 5=bus, 7=truck
@@ -53,7 +53,7 @@ class PipelineConfig:
     enable_smart_gating: bool = True
     min_vehicle_width: int = 40
     min_vehicle_height: int = 35
-    min_readable_vehicle_area: float = 2500.0  # Minimum box area to be considered readable
+    min_readable_vehicle_area: float = 1200.0  # Minimum box area to be considered readable
     # Horizon exclusion: 0.0 disables cutoff to capture far-away carriageway vehicles
     roi_top_cutoff_ratio: float = 0.0
     # Optional ROI polygon [[x, y], ...]. If None, whole frame lower zone is used.
@@ -90,8 +90,8 @@ class PipelineConfig:
     # -------------------------------------------------------------
     # Single Detection & Fuzzy Duplicate Suppression
     # -------------------------------------------------------------
-    min_track_frames: int = 6             # Minimum frames tracked before emitting event
-    max_disappeared_frames: int = 45      # Frames lost before closing track (1.5s at 30 fps)
+    min_track_frames: int = 3             # Minimum frames tracked before emitting event
+    max_disappeared_frames: int = 60      # Frames lost before closing track (2s at 30 fps)
     min_confident_plate_conf: float = 0.70
     duplicate_plate_window_sec: float = 60.0  # Suppress duplicate events within 60s
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
