@@ -32,6 +32,24 @@ from fast_alpr import ALPR
 from tracker import VehicleTrackerManager, filter_nested_boxes, levenshtein_distance
 
 
+def register_nvidia_dll_paths() -> None:
+    """Register NVIDIA runtime DLL directories before loading ONNX Runtime."""
+    site_packages = Path(sys.base_prefix) / "Lib" / "site-packages"
+    try:
+        import site
+
+        for candidate in site.getsitepackages():
+            nvidia_root = Path(candidate) / "nvidia"
+            if nvidia_root.is_dir():
+                for dll_dir in nvidia_root.rglob("bin"):
+                    path = str(dll_dir)
+                    if os.name == "nt" and hasattr(os, "add_dll_directory"):
+                        os.add_dll_directory(path)
+                    os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
+
+
 class ColabLivePreviewWorker:
     """Non-blocking background worker for Colab real-time visual updates."""
 
@@ -104,6 +122,39 @@ class ColabLivePreviewWorker:
             self.thread.join(timeout=1.0)
 
 
+class DesktopPreviewWorker:
+    """Real-time OpenCV preview window for Windows and local desktop runs."""
+
+    def __init__(self, max_w: int = 960, max_h: int = 540):
+        self.max_w = max_w
+        self.max_h = max_h
+        self.running = False
+        self.window_name = "FastALPR Realtime Preview"
+
+    def start(self) -> None:
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, self.max_w, self.max_h)
+        self.running = True
+
+    def update_frame(self, frame: np.ndarray) -> None:
+        if not self.running:
+            return
+        h, w = frame.shape[:2]
+        scale = min(self.max_w / w, self.max_h / h, 1.0)
+        if scale < 1.0:
+            preview = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+        else:
+            preview = frame
+        cv2.imshow(self.window_name, preview)
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q"), ord("Q")):
+            self.running = False
+
+    def stop(self) -> None:
+        self.running = False
+        cv2.destroyWindow(self.window_name)
+
+
 class VehicleALPRPipeline:
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
@@ -125,7 +176,7 @@ class VehicleALPRPipeline:
         self.vehicle_model = None
         self.alpr = None
         self.tracker_manager = VehicleTrackerManager(self.config)
-        self.preview_worker: Optional[ColabLivePreviewWorker] = None
+        self.preview_worker: Optional[ColabLivePreviewWorker | DesktopPreviewWorker] = None
         self.has_cuda = False
         self._printed_char_conf_proof: bool = False
 
@@ -189,6 +240,7 @@ class VehicleALPRPipeline:
     def initialize_models(self) -> None:
         """Loads and verifies models on GPU/CUDA with native FP16 support without warnings."""
         try:
+            register_nvidia_dll_paths()
             import onnxruntime as ort
 
             available_providers = ort.get_available_providers()
@@ -264,6 +316,7 @@ class VehicleALPRPipeline:
         video_source: str | int | Path,
         output_video_path: Optional[str | Path] = None,
         max_frames: Optional[int] = None,
+        start_frame: int = 0,
     ) -> list[dict]:
         """
         Processes video stream with end-to-end profiling, ALPR on crops,
@@ -288,6 +341,12 @@ class VehicleALPRPipeline:
         if not cap.isOpened():
             raise RuntimeError(f"Could not open video source: {video_source}")
 
+        if start_frame > 0:
+            if not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
+                print(f"[INPUT WARNING] Could not seek to frame {start_frame}. Starting from frame 1.")
+            else:
+                print(f"[INPUT] Starting preview at frame {start_frame}.")
+
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -307,10 +366,9 @@ class VehicleALPRPipeline:
             print(f"[OUTPUT] Writing video at {fps:.1f} FPS to: {raw_output_path.resolve()}")
 
         if self.config.show_preview:
-            self.preview_worker = ColabLivePreviewWorker(
+            self.preview_worker = DesktopPreviewWorker(
                 max_w=self.config.preview_max_width,
                 max_h=self.config.preview_max_height,
-                jpeg_quality=self.config.preview_jpeg_quality,
             )
             self.preview_worker.start()
 
@@ -642,6 +700,9 @@ class VehicleALPRPipeline:
                 if self.preview_worker is not None and annotated_frame is not None:
                     if frame_idx % self.config.preview_interval == 0:
                         self.preview_worker.update_frame(annotated_frame)
+                        if not getattr(self.preview_worker, "running", True):
+                            print("[INFO] Preview window closed. Stopping pipeline.")
+                            break
                 prof_preview += time.perf_counter() - t_prev_start
 
                 # Clean console log once every 60 frames

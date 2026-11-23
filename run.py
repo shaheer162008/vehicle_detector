@@ -223,6 +223,12 @@ def parse_args():
         default=None,
         help="Optional maximum number of frames to process.",
     )
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="Optional frame number to start processing from.",
+    )
     return parser.parse_args()
 
 
@@ -315,6 +321,7 @@ def main():
             video_source=video_source,
             output_video_path=args.output_video,
             max_frames=args.max_frames,
+            start_frame=args.start_frame,
         )
     except KeyboardInterrupt:
         print("\n[INFO] User interrupted pipeline. Finalizing and saving outputs...")
@@ -322,6 +329,7 @@ def main():
         print(f"[FATAL ERROR] Pipeline crashed with error: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

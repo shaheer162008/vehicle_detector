@@ -31,7 +31,19 @@ if %errorlevel% equ 0 (
 
 rem 4. Install dependencies
 echo [3/3] Installing requirements.txt with pre-built binary wheels...
-python -m pip install -r requirements.txt --no-input --prefer-binary
+where uv >nul 2>nul
+if %errorlevel% equ 0 (
+    uv venv --python 3.13 --clear .venv
+    uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+    uv pip install --python .venv\Scripts\python.exe --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    uv pip install --python .venv\Scripts\python.exe "onnxruntime-gpu[cuda,cudnn]==1.22.0"
+) else (
+    py -3.13 -m venv .venv
+    .venv\Scripts\python.exe -m pip install --upgrade pip
+    .venv\Scripts\python.exe -m pip install -r requirements.txt --no-input --prefer-binary
+    .venv\Scripts\python.exe -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    .venv\Scripts\python.exe -m pip install "onnxruntime-gpu[cuda,cudnn]==1.22.0"
+)
 
 echo =================================================
 echo === Installation Completed Successfully! ===
