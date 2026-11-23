@@ -95,6 +95,7 @@ class PipelineConfig:
     min_confident_plate_conf: float = 0.70
     duplicate_plate_window_sec: float = 60.0  # Suppress duplicate events within 60s
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
+    stitch_max_gap_frames: int = 30           # Maximum frame gap between tracks for stitching
     box_smoothing_factor: float = 0.0         # 0.0 for raw detector boxes (zero lag on ALPR & vehicle snapshots)
     hud_box_smoothing_factor: float = 0.65    # Smoothing factor for HUD video visualization only
     include_remarks: bool = False             # Set True only if remarks field is requested

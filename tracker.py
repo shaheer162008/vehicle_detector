@@ -480,6 +480,8 @@ class TrackState:
     global_id: str
     first_frame_idx: int
     last_frame_idx: int
+    first_frame: int = 0
+    last_frame: int = 0
     frames_tracked: int = 1
     disappeared_count: int = 0
     # Smoothed bounding box [x1, y1, x2, y2]
@@ -489,6 +491,20 @@ class TrackState:
     first_raw_box: Optional[List[float]] = None
     last_raw_box: Optional[List[float]] = None
     frame_boxes: Dict[int, List[float]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.first_frame == 0 and self.first_frame_idx != 0:
+            self.first_frame = self.first_frame_idx
+        elif self.first_frame_idx == 0 and self.first_frame != 0:
+            self.first_frame_idx = self.first_frame
+        if self.last_frame == 0 and self.last_frame_idx != 0:
+            self.last_frame = self.last_frame_idx
+        elif self.last_frame_idx == 0 and self.last_frame != 0:
+            self.last_frame_idx = self.last_frame
+        if self.first_raw_box is None and self.raw_box is not None:
+            self.first_raw_box = [float(v) for v in self.raw_box]
+        if self.last_raw_box is None and self.raw_box is not None:
+            self.last_raw_box = [float(v) for v in self.raw_box]
     # Previous box center for spatial jump tracking
     last_center: Optional[Tuple[float, float]] = None
     # Best vehicle snapshot data
@@ -660,14 +676,16 @@ class VehicleTrackerManager:
                 global_id=global_id,
                 first_frame_idx=frame_idx,
                 last_frame_idx=frame_idx,
+                first_frame=frame_idx,
+                last_frame=frame_idx,
                 frames_tracked=1,
                 disappeared_count=0,
                 smoothed_box=[rx1, ry1, rx2, ry2],
                 hud_smoothed_box=[kalman_box[0], kalman_box[1], kalman_box[2], kalman_box[3]],
                 kalman_box=kalman_box,
                 raw_box=raw_box,
-                first_raw_box=raw_box,
-                last_raw_box=raw_box,
+                first_raw_box=[float(v) for v in raw_box],
+                last_raw_box=[float(v) for v in raw_box],
                 frame_boxes={frame_idx: raw_box},
                 last_center=(cx, cy),
                 best_raw_box=raw_box if raw_det_box is not None else None,
@@ -698,10 +716,15 @@ class VehicleTrackerManager:
 
             track.last_center = (cx, cy)
             track.last_frame_idx = frame_idx
+            track.last_frame = frame_idx
             track.frames_tracked += 1
             track.disappeared_count = 0
             track.raw_box = raw_box
-            track.last_raw_box = raw_box
+            track.last_raw_box = [float(v) for v in raw_box]
+            if track.first_raw_box is None:
+                track.first_raw_box = [float(v) for v in raw_box]
+            if track.first_frame == 0 and track.first_frame_idx != 0:
+                track.first_frame = track.first_frame_idx
             track.frame_boxes[frame_idx] = raw_box
             if complete:
                 track.has_complete_frame = True
@@ -894,16 +917,18 @@ class VehicleTrackerManager:
 
         if consensus_result is not None:
             voted_text, voted_conf = consensus_result
-            track.best_plate_text = voted_text
-            track.best_plate_conf = voted_conf
+            # Plate lock: jab track.plate_confident_reached ho jaye, plate text aur confidence dobara overwrite na ho
+            if not track.plate_confident_reached:
+                track.best_plate_text = voted_text
+                track.best_plate_conf = voted_conf
 
-            if (
-                "?" not in voted_text
-                and len(voted_text) >= self.config.min_plate_length
-                and voted_conf >= self.config.min_confident_plate_conf
-                and len(track.plate_readings) >= self.config.min_plate_reads_for_event
-            ):
-                track.plate_confident_reached = True
+                if (
+                    "?" not in voted_text
+                    and len(voted_text) >= self.config.min_plate_length
+                    and voted_conf >= self.config.min_confident_plate_conf
+                    and len(track.plate_readings) >= self.config.min_plate_reads_for_event
+                ):
+                    track.plate_confident_reached = True
 
     def match_and_update_plates(
         self,
@@ -1003,61 +1028,77 @@ class VehicleTrackerManager:
     def can_stitch_tracks(self, t1: TrackState, t2: TrackState) -> bool:
         """
         Evaluates whether two tracks represent the same vehicle:
-        A3: Plate-based stitching (plates identical or diff <= 1 char ignoring '?' within 45 frames, regardless of box overlap).
-        1. Time overlap: active at same time, or start within 20 frames of other's last frame.
-        2. Confident plate check: levenshtein <= 2 if both have confident plates.
-        3. Box overlap: IoU > 0.25 or containment > 0.60.
+        HARD VETO rules (if any is True, return False):
+        2a. Frame ranges overlap (dono aik hi waqt par zinda thay) -> False.
+        2b. Both have confident plate and plate texts differ (Levenshtein >= 2) -> False.
+        2c. Gap (t2.first_frame - t1.last_frame) > stitch_max_gap_frames (default 30) or gap < 0 -> False.
+
+        After passing all vetoes:
+        3. Match: Compare t1.last_raw_box with t2.first_raw_box ONLY (IoU >= 0.15 or centre distance <= 1.5 * box diagonal).
+           NEVER compare with best_raw_box.
         """
-        # Requirement F2: Plate-based stitching
-        # Merge two tracks ONLY if they do NOT overlap in time (one track has already ended before
-        # the other starts, gap between 1 and 45 frames) AND their plates are identical or differ
-        # by <= 1 character ignoring "?". Never merge two tracks that are active at the same time through this rule.
-        t1_ends_before_t2 = (t1.last_frame_idx < t2.first_frame_idx) and (1 <= t2.first_frame_idx - t1.last_frame_idx <= 45)
-        t2_ends_before_t1 = (t2.last_frame_idx < t1.first_frame_idx) and (1 <= t1.first_frame_idx - t2.last_frame_idx <= 45)
-        if t1_ends_before_t2 or t2_ends_before_t1:
-            p1 = t1.best_plate_text
-            p2 = t2.best_plate_text
-            if p1 and p2 and plates_match_differ_by_one(p1, p2):
-                return True
+        t1_first = t1.first_frame if t1.first_frame else t1.first_frame_idx
+        t1_last = t1.last_frame if t1.last_frame else t1.last_frame_idx
+        t2_first = t2.first_frame if t2.first_frame else t2.first_frame_idx
+        t2_last = t2.last_frame if t2.last_frame else t2.last_frame_idx
 
-        # 1. Time overlap / proximity check
-        time_overlap = False
-        if max(t1.first_frame_idx, t2.first_frame_idx) <= min(t1.last_frame_idx, t2.last_frame_idx):
-            time_overlap = True
-        elif 0 <= t2.first_frame_idx - t1.last_frame_idx <= 20:
-            time_overlap = True
-        elif 0 <= t1.first_frame_idx - t2.last_frame_idx <= 20:
-            time_overlap = True
-
-        if not time_overlap:
+        # 2a. Time overlap veto: t1 and t2 frame ranges overlap (both active at the same time) -> False
+        if max(t1_first, t2_first) <= min(t1_last, t2_last):
             return False
 
-        # 2. Confident plate consistency check
-        has_conf1 = t1.plate_confident_reached and t1.best_plate_text
-        has_conf2 = t2.plate_confident_reached and t2.best_plate_text
+        # 2b. Confident plate mismatch veto: both have confident plate and text differs (Levenshtein >= 2) -> False
+        has_conf1 = bool(t1.plate_confident_reached and t1.best_plate_text)
+        has_conf2 = bool(t2.plate_confident_reached and t2.best_plate_text)
         if has_conf1 and has_conf2:
-            dist = levenshtein_distance(t1.best_plate_text, t2.best_plate_text)
-            if dist > 2:
+            if levenshtein_distance(t1.best_plate_text, t2.best_plate_text) >= 2:
                 return False
 
-        # 3. Box overlap check (IoU > 0.25 or containment > 0.60)
-        common_frames = set(t1.frame_boxes.keys()) & set(t2.frame_boxes.keys())
-        for f in common_frames:
-            if self._boxes_overlap_match(t1.frame_boxes[f], t2.frame_boxes[f]):
-                return True
+        # 2c. Gap veto: (t2.first_frame - t1.last_frame) > stitch_max_gap_frames or gap < 0 -> False
+        max_gap = getattr(self.config, "stitch_max_gap_frames", 30)
+        gap = t2_first - t1_last
+        if gap < 0 or gap > max_gap:
+            return False
 
-        if t1.last_frame_idx <= t2.first_frame_idx and t1.last_raw_box and t2.first_raw_box:
-            if self._boxes_overlap_match(t1.last_raw_box, t2.first_raw_box):
-                return True
-        elif t2.last_frame_idx <= t1.first_frame_idx and t2.last_raw_box and t1.first_raw_box:
-            if self._boxes_overlap_match(t2.last_raw_box, t1.first_raw_box):
-                return True
+        # 3. Match comparison: t1.last_raw_box with t2.first_raw_box ONLY (NEVER best_raw_box)
+        b1 = t1.last_raw_box
+        b2 = t2.first_raw_box
+        if b1 is None or b2 is None:
+            return False
 
-        if self._boxes_overlap_match(t1.best_raw_box, t2.best_raw_box):
+        # IoU check (>= 0.15)
+        ix1 = max(b1[0], b2[0])
+        iy1 = max(b1[1], b2[1])
+        ix2 = min(b1[2], b2[2])
+        iy2 = min(b1[3], b2[3])
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+
+        area1 = max(0.0, (b1[2] - b1[0]) * (b1[3] - b1[1]))
+        area2 = max(0.0, (b2[2] - b2[0]) * (b2[3] - b2[1]))
+        union = area1 + area2 - inter
+        iou = (inter / union) if union > 0.0 else 0.0
+
+        if iou >= 0.15:
             return True
-        b1 = t1.last_raw_box or t1.best_raw_box
-        b2 = t2.last_raw_box or t2.best_raw_box
-        if self._boxes_overlap_match(b1, b2):
+
+        # Centre distance check (<= 1.5 * box diagonal)
+        c1_x = (b1[0] + b1[2]) / 2.0
+        c1_y = (b1[1] + b1[3]) / 2.0
+        c2_x = (b2[0] + b2[2]) / 2.0
+        c2_y = (b2[1] + b2[3]) / 2.0
+        center_dist = math.hypot(c1_x - c2_x, c1_y - c2_y)
+
+        w1 = max(0.0, b1[2] - b1[0])
+        h1 = max(0.0, b1[3] - b1[1])
+        diag1 = math.hypot(w1, h1)
+
+        w2 = max(0.0, b2[2] - b2[0])
+        h2 = max(0.0, b2[3] - b2[1])
+        diag2 = math.hypot(w2, h2)
+
+        box_diag = max(diag1, diag2)
+        if center_dist <= 1.5 * box_diag:
             return True
 
         return False
@@ -1066,13 +1107,24 @@ class VehicleTrackerManager:
         """
         Merges 'absorbed' into 'survivor' track:
         Combines merged track IDs, plate readings, and selects the highest scoring snapshot.
+        Maintains first_raw_box, last_raw_box, first_frame, and last_frame.
+        Respects plate lock on survivor and absorbed.
         """
         for tid in absorbed.merged_track_ids:
             if tid not in survivor.merged_track_ids:
                 survivor.merged_track_ids.append(tid)
 
+        if absorbed.first_frame_idx < survivor.first_frame_idx:
+            if absorbed.first_raw_box is not None:
+                survivor.first_raw_box = [float(v) for v in absorbed.first_raw_box]
+        if absorbed.last_frame_idx > survivor.last_frame_idx:
+            if absorbed.last_raw_box is not None:
+                survivor.last_raw_box = [float(v) for v in absorbed.last_raw_box]
+
         survivor.first_frame_idx = min(survivor.first_frame_idx, absorbed.first_frame_idx)
         survivor.last_frame_idx = max(survivor.last_frame_idx, absorbed.last_frame_idx)
+        survivor.first_frame = survivor.first_frame_idx
+        survivor.last_frame = survivor.last_frame_idx
         survivor.frames_tracked += absorbed.frames_tracked
         survivor.has_complete_frame = survivor.has_complete_frame or absorbed.has_complete_frame
         survivor.max_vehicle_area = max(survivor.max_vehicle_area, absorbed.max_vehicle_area)
@@ -1106,18 +1158,26 @@ class VehicleTrackerManager:
                 survivor.last_plate_box_frame = absorbed.last_plate_box_frame
                 survivor.last_plate_box_frame_idx = absorbed.last_plate_box_frame_idx
 
-        consensus_res = character_level_voting(
-            readings=survivor.plate_readings,
-            min_length=self.config.min_plate_length,
-            regex_pattern=self.config.plate_regex_pattern if self.config.enforce_regex else None,
-            uk_syntax_correction=self.config.uk_syntax_correction,
-            plate_format=self.config.plate_format,
-            syntax_correction=self.config.plate_syntax_correction,
-        )
-        if consensus_res is not None:
-            survivor.best_plate_text, survivor.best_plate_conf = consensus_res
-        if absorbed.plate_confident_reached or survivor.plate_confident_reached:
+        # Plate lock: preserve locked plate on survivor or absorbed
+        if survivor.plate_confident_reached and survivor.best_plate_text:
+            pass
+        elif absorbed.plate_confident_reached and absorbed.best_plate_text:
+            survivor.best_plate_text = absorbed.best_plate_text
+            survivor.best_plate_conf = absorbed.best_plate_conf
             survivor.plate_confident_reached = True
+        else:
+            consensus_res = character_level_voting(
+                readings=survivor.plate_readings,
+                min_length=self.config.min_plate_length,
+                regex_pattern=self.config.plate_regex_pattern if self.config.enforce_regex else None,
+                uk_syntax_correction=self.config.uk_syntax_correction,
+                plate_format=self.config.plate_format,
+                syntax_correction=self.config.plate_syntax_correction,
+            )
+            if consensus_res is not None:
+                survivor.best_plate_text, survivor.best_plate_conf = consensus_res
+            if absorbed.plate_confident_reached or survivor.plate_confident_reached:
+                survivor.plate_confident_reached = True
 
         # Best snapshot selection across both (Requirement C)
         comb_max_sharp = max(survivor.max_sharpness, absorbed.max_sharpness)
@@ -1159,7 +1219,7 @@ class VehicleTrackerManager:
                 if other_id in current_track.merged_track_ids:
                     continue
 
-                if self.can_stitch_tracks(current_track, other):
+                if self.can_stitch_tracks(current_track, other) or self.can_stitch_tracks(other, current_track):
                     if other.disappeared_count < self.config.max_disappeared_frames:
                         self.merge_tracks(survivor=other, absorbed=current_track)
                         return other
