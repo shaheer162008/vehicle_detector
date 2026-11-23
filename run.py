@@ -338,23 +338,32 @@ def main():
 
     # 3. Fallback logic if video_source is still None
     if not video_source:
-        # Check stream/stream.mp4 first, then stream_2.mp4, then stream.mp4
-        if Path("stream/stream.mp4").exists():
-            video_source = "stream/stream.mp4"
-            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
-        elif Path("stream_2.mp4").exists():
-            video_source = "stream_2.mp4"
-            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
-        elif Path("stream.mp4").exists():
-            video_source = "stream.mp4"
-            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
+        # Attempt to locate a default video in common locations
+        default_paths = [
+            "stream/stream.mp4",
+            "stream_2.mp4",
+            "stream.mp4",
+        ]
+        for p in default_paths:
+            if Path(p).exists():
+                video_source = p
+                print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
+                break
         else:
-            print("[ERROR] No input video source provided!")
-            print("Usage Examples:")
-            print("  1. Stream folder video:      python run.py --source stream/stream.mp4 --simulate-camera")
-            print("  2. Live camera stream:       python run.py --source http://127.0.0.1:8554/live")
-            print("  3. Multi-camera RTSP stream: python run.py --cameras-config cameras.json --camera-id CAM-00001")
-            sys.exit(1)
+            # If no local video, try to download a sample demo video
+            sample_url = "https://github.com/ankandrew/fast-alpr/raw/main/stream/stream.mp4"
+            target_path = Path("stream/stream.mp4")
+            try:
+                import urllib.request
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                print(f"[DOWNLOAD] Fetching demo video from {sample_url} ...")
+                urllib.request.urlretrieve(sample_url, str(target_path))
+                video_source = str(target_path)
+                print(f"[INPUT] Downloaded demo video to {video_source}")
+            except Exception as dl_err:
+                print(f"[ERROR] Failed to download demo video: {dl_err}")
+                print("Please provide a valid --source path to a video file.")
+                sys.exit(1)
 
     print(f"[SYSTEM] Pipeline ready for Camera: {config.camera_id} | Format: {config.plate_format}")
     if config.camera_location:
