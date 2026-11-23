@@ -231,4 +231,6 @@ frame_test.png
 results.gif
 *.tmp
 CPK NZ*
+stream/*.mp4
+
 

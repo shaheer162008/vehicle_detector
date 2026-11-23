@@ -155,6 +155,76 @@ class DesktopPreviewWorker:
         cv2.destroyWindow(self.window_name)
 
 
+class RealtimeCameraCapture:
+    """Simulates an IP CCTV camera feed from an MP4 file.
+    Paces frame delivery at the camera's exact wall-clock FPS.
+    If the downstream AI pipeline runs slower than the camera,
+    stale frames are dropped (exact RTSP camera behavior).
+    """
+
+    def __init__(self, video_path: str, loop: bool = False):
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open video file: {video_path}")
+        self.loop = loop
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 25.0
+        if self.fps <= 0 or self.fps > 120:
+            self.fps = 25.0
+        self.frame_interval = 1.0 / self.fps
+        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        self.latest_frame: Optional[np.ndarray] = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.is_eof = False
+        self.thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.thread.start()
+
+    def _reader_loop(self) -> None:
+        while self.running:
+            t_start = time.perf_counter()
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                if self.loop:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = self.cap.read()
+                else:
+                    self.is_eof = True
+                    break
+            if ret and frame is not None:
+                with self.lock:
+                    self.latest_frame = frame
+            elapsed = time.perf_counter() - t_start
+            sleep_time = self.frame_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        if self.latest_frame is None and not self.is_eof:
+            time.sleep(self.frame_interval / 2)
+        with self.lock:
+            if self.latest_frame is not None:
+                return True, self.latest_frame.copy()
+            if self.is_eof:
+                return False, None
+            return False, None
+
+    def get(self, prop_id: int) -> float:
+        return self.cap.get(prop_id)
+
+    def set(self, prop_id: int, value: float) -> bool:
+        return self.cap.set(prop_id, value)
+
+    def isOpened(self) -> bool:
+        return self.running and (not self.is_eof or self.latest_frame is not None)
+
+    def release(self) -> None:
+        self.running = False
+        self.cap.release()
+
+
 class VehicleALPRPipeline:
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
@@ -317,6 +387,8 @@ class VehicleALPRPipeline:
         output_video_path: Optional[str | Path] = None,
         max_frames: Optional[int] = None,
         start_frame: int = 0,
+        simulate_camera: bool = False,
+        loop_stream: bool = False,
     ) -> list[dict]:
         """
         Processes video stream with end-to-end profiling, ALPR on crops,
@@ -336,7 +408,11 @@ class VehicleALPRPipeline:
             video_path = Path(video_source)
             if not video_path.exists():
                 raise FileNotFoundError(f"Input video file not found: {video_path.resolve()}")
-            cap = cv2.VideoCapture(str(video_path))
+            if simulate_camera:
+                print(f"[INPUT] Simulating live camera feed at native FPS from: {video_path.name}")
+                cap = RealtimeCameraCapture(str(video_path), loop=loop_stream)
+            else:
+                cap = cv2.VideoCapture(str(video_path))
 
         if not cap.isOpened():
             raise RuntimeError(f"Could not open video source: {video_source}")

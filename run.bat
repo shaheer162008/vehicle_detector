@@ -1,85 +1,91 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "DRIVE_FILE_ID=1szprqeBN3eQ5vBcRJ8HVIowMu514F94L"
-set "VIDEO_DIR=videos"
-set "VIDEO_PATH=videos\drive_input.mp4"
-set "OUTPUT_VIDEO=output\annotated_output.mp4"
+echo ==============================================================================
+echo  === FastALPR Vehicle Tracking Runner (Turnkey Stream + Detection) ===
+echo ==============================================================================
 
-echo === FastALPR Vehicle Tracking Run Script ===
-
-where python >nul 2>nul
-if errorlevel 1 (
-    echo [ERROR] Python not found in PATH. Install Python 3.10+ or run install.bat first.
-    exit /b 1
+rem 0. Load .env file if present
+if exist ".env" (
+    echo [CONFIG] Loading environment variables from .env...
+    for /f "usebackq tokens=1* delims==" %%A in (".env") do (
+        set "key=%%A"
+        set "val=%%B"
+        if not "!key:~0,1!"=="#" (
+            set "!key!=!val!"
+        )
+    )
 )
 
+rem 1. Set Environment Variable Defaults
+if "%STREAM_PORT%"=="" set "STREAM_PORT=8554"
+if "%STREAM_VIDEO%"=="" set "STREAM_VIDEO=stream\stream.mp4"
+if "%STREAM_URL%"=="" set "STREAM_URL=http://127.0.0.1:%STREAM_PORT%/live"
+if "%PLATE_FORMAT%"=="" set "PLATE_FORMAT=PAKISTAN"
+if "%OUTPUT_VIDEO%"=="" set "OUTPUT_VIDEO=output\annotated_output.mp4"
+
+rem Allow override via CLI argument 1
+if not "%~1"=="" set "STREAM_VIDEO=%~1"
+
+rem 2. Verify Virtual Environment
 if not exist ".venv\Scripts\python.exe" (
-    echo [ERROR] CUDA environment not found. Run install.bat first.
-    exit /b 1
+    echo [WARNING] Virtual environment ^(.venv^) not found!
+    echo Running install.bat to setup your GPU environment first...
+    call install.bat
+    if errorlevel 1 (
+        echo [ERROR] Installation failed. Cannot continue.
+        pause
+        exit /b 1
+    )
 )
 
 set "PYTHON=.venv\Scripts\python.exe"
 
-"%PYTHON%" -c "import cv2, torch, ultralytics, fast_alpr, onnxruntime" >nul 2>nul
-if errorlevel 1 (
-    echo [WARNING] Required CUDA packages look missing. Run install.bat once, then re-run this script.
+rem 3. Detect Active Compute Device (GPU Preferred)
+for /f "delims=" %%D in ('"%PYTHON%" -c "import torch; print(('GPU: ' + torch.cuda.get_device_name(0)) if torch.cuda.is_available() else 'CPU (No CUDA detected)')"') do (
+    set "COMPUTE_DEVICE=%%D"
 )
+echo [COMPUTE ENGINE] %COMPUTE_DEVICE%
+echo [STREAM SOURCE]  %STREAM_VIDEO%
+echo [STREAM URL]     %STREAM_URL%
+echo [PLATE FORMAT]   %PLATE_FORMAT%
 
-"%PYTHON%" -c "import gdown" >nul 2>nul
-if errorlevel 1 (
-    echo [1/4] Installing gdown ^(Google Drive downloader^)...
-    "%PYTHON%" -m pip install gdown --no-input --quiet
-)
-
-if not "%~1"=="" goto custom_input
-
-if not exist "%VIDEO_DIR%" mkdir "%VIDEO_DIR%"
-if exist "%VIDEO_PATH%" goto input_ready
-
-echo [2/4] Downloading video from Google Drive...
-"%PYTHON%" -c "import gdown; gdown.download(id='%DRIVE_FILE_ID%', output=r'%VIDEO_PATH%', quiet=False)"
-if errorlevel 1 (
-    echo [ERROR] Google Drive download failed.
-    echo         Make sure the file sharing is set to "Anyone with the link".
-    exit /b 1
-)
-goto input_ready
-
-:custom_input
-set "VIDEO_PATH=%~1"
-echo [2/4] Using local video: %VIDEO_PATH%
-goto input_ready
-
-:input_ready
-if not exist "%VIDEO_PATH%" (
-    echo [ERROR] Input video not found: %VIDEO_PATH%
-    exit /b 1
-)
-for %%A in ("%VIDEO_PATH%") do set "VIDEO_SIZE=%%~zA"
-if "%VIDEO_SIZE%"=="0" (
-    echo [ERROR] Input video file is empty ^(0 bytes^): %VIDEO_PATH%
-    echo         Delete it and re-run to download again.
+rem 4. Check if stream video exists
+if not exist "%STREAM_VIDEO%" (
+    echo [ERROR] Stream video not found at: %STREAM_VIDEO%
+    echo Please make sure stream\stream.mp4 exists or pass your video path as an argument.
+    pause
     exit /b 1
 )
 
-echo [3/4] Running ALPR tracking pipeline on: %VIDEO_PATH%
+rem 5. Launch Live Stream Broadcaster in Background
 echo.
-"%PYTHON%" -c "import cv2; c=cv2.VideoCapture(r'%VIDEO_PATH%'); print(int(c.get(cv2.CAP_PROP_FRAME_COUNT)/2)); c.release()" > .start_frame.tmp
-set /p START_FRAME=<.start_frame.tmp
-del /q .start_frame.tmp
-if "%START_FRAME%"=="" set "START_FRAME=0"
-echo [3/4] Starting preview from frame %START_FRAME%
-"%PYTHON%" run.py --source "%VIDEO_PATH%" --output-video "%OUTPUT_VIDEO%" --plate-format PAKISTAN --preview --no-save-video --start-frame %START_FRAME%
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Pipeline run failed. See messages above.
-    exit /b 1
-)
+echo [1/2] Starting Live Camera Stream Broadcaster on port %STREAM_PORT%...
+start "FastALPR_StreamBroadcaster" /min "%PYTHON%" stream\live_stream.py --video "%STREAM_VIDEO%" --port %STREAM_PORT%
+
+rem Wait 2 seconds for server to bind port
+timeout /t 2 /nobreak >nul
+
+rem 6. Launch ALPR Tracking Pipeline on the Live Stream
+echo [2/2] Launching FastALPR Pipeline on live camera stream...
+echo [INFO] Press 'q' or ESC in preview window to exit.
+echo.
+
+"%PYTHON%" run.py --source "%STREAM_URL%" --plate-format "%PLATE_FORMAT%" --output-video "%OUTPUT_VIDEO%" --preview
+
+set "RUN_EXIT_CODE=%errorlevel%"
+
+rem 7. Terminate the Background Stream Broadcaster Cleanly
+echo.
+echo [CLEANUP] Stopping Live Camera Stream Broadcaster...
+taskkill /F /FI "WINDOWTITLE eq FastALPR_StreamBroadcaster*" >nul 2>&1
 
 echo.
-echo === Preview session finished ===
-echo Snapshots     : output\snapshots
-echo Events JSON   : output\events.json
-endlocal
+echo ==============================================================================
+echo  === Session Finished Successfully ===
+echo  Output Video : %OUTPUT_VIDEO%
+echo  Snapshots    : output\snapshots\
+echo  Events JSON  : output\events.json
+echo ==============================================================================
+exit /b %RUN_EXIT_CODE%

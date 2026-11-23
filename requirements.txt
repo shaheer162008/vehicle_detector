@@ -1,12 +1,12 @@
 # ==============================================================================
 # FastALPR with Vehicle Detection & Tracking Dependencies
-# Cross-platform: Linux (Colab) & Windows
+# Cross-platform: Windows, Linux (Colab, Ubuntu) & macOS
 # ==============================================================================
 
 # Core FastALPR OCR and Plate Detection
 fast-plate-ocr>=1.1.0
 open-image-models>=0.5.1
-opencv-python-headless>=4.9.0.80
+opencv-python>=4.8.0
 
 # Vehicle Detector & Tracker
 # NOTE: Ultralytics is licensed under GNU AGPL-3.0.

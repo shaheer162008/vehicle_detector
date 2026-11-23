@@ -23,15 +23,34 @@ from config import PipelineConfig, load_camera_from_json
 from pipeline import VehicleALPRPipeline
 
 
+def load_env_file():
+    """Lightweight zero-dependency .env loader."""
+    env_path = Path(".env")
+    if env_path.is_file():
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+
 def parse_args():
+    load_env_file()
     parser = argparse.ArgumentParser(
         description="Vehicle ALPR Single-Detection Pipeline (Enterprise Safe City Ready)"
     )
     parser.add_argument(
         "--source",
         type=str,
-        default=None,
-        help="Path to input video file (e.g. stream.mp4), RTSP stream, or camera index. If omitted, uses camera RTSP from cameras.json.",
+        default=os.environ.get("STREAM_URL") or os.environ.get("STREAM_VIDEO") or None,
+        help="Path to input video file (e.g. stream/stream.mp4), RTSP/HTTP stream URL, or camera index.",
     )
     parser.add_argument(
         "--cameras-config",
@@ -42,15 +61,15 @@ def parse_args():
     parser.add_argument(
         "--camera-id",
         type=str,
-        default="CAM-00001",
-        help="Camera ID string for event logging (e.g. CAM-00001). Default: CAM-00001.",
+        default=os.environ.get("CAMERA_ID", "CAM-00001"),
+        help="Camera ID string for event logging (e.g. CAM-00001). Default: CAM-00001 or $CAMERA_ID.",
     )
     parser.add_argument(
         "--plate-format",
         type=str,
         choices=["PAKISTAN", "GENERAL", "UK"],
-        default="UK",
-        help="License plate format standard (default: UK).",
+        default=os.environ.get("PLATE_FORMAT", "PAKISTAN"),
+        help="License plate format standard (default: PAKISTAN or $PLATE_FORMAT).",
     )
     parser.add_argument(
         "--node-id",
@@ -67,8 +86,8 @@ def parse_args():
     parser.add_argument(
         "--output-video",
         type=str,
-        default="output/annotated_output.mp4",
-        help="Path where annotated output video will be saved.",
+        default=os.environ.get("OUTPUT_VIDEO", "output/annotated_output.mp4"),
+        help="Path where annotated output video will be saved (default: output/annotated_output.mp4 or $OUTPUT_VIDEO).",
     )
     parser.add_argument(
         "--vehicle-conf",
@@ -229,6 +248,18 @@ def parse_args():
         default=0,
         help="Optional frame number to start processing from.",
     )
+    parser.add_argument(
+        "--simulate-camera",
+        action="store_true",
+        default=False,
+        help="Simulate real-time IP camera delivery at native camera FPS with live frame dropping.",
+    )
+    parser.add_argument(
+        "--loop-stream",
+        action="store_true",
+        default=False,
+        help="Continuously loop the input video stream (infinite 24/7 CCTV simulation).",
+    )
     return parser.parse_args()
 
 
@@ -300,15 +331,22 @@ def main():
 
     # 3. Fallback logic if video_source is still None
     if not video_source:
-        # Check if default stream.mp4 exists in current working directory
-        if Path("stream.mp4").exists():
+        # Check stream/stream.mp4 first, then stream_2.mp4, then stream.mp4
+        if Path("stream/stream.mp4").exists():
+            video_source = "stream/stream.mp4"
+            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
+        elif Path("stream_2.mp4").exists():
+            video_source = "stream_2.mp4"
+            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
+        elif Path("stream.mp4").exists():
             video_source = "stream.mp4"
-            print(f"[INPUT] No source specified. Automatically defaulted to local video: {video_source}")
+            print(f"[INPUT] No source specified. Automatically defaulted to: {video_source}")
         else:
             print("[ERROR] No input video source provided!")
             print("Usage Examples:")
-            print("  1. Custom offline video:     python run.py --source stream.mp4")
-            print("  2. Multi-camera RTSP stream: python run.py --cameras-config cameras.json --camera-id CAM-00001")
+            print("  1. Stream folder video:      python run.py --source stream/stream.mp4 --simulate-camera")
+            print("  2. Live camera stream:       python run.py --source http://127.0.0.1:8554/live")
+            print("  3. Multi-camera RTSP stream: python run.py --cameras-config cameras.json --camera-id CAM-00001")
             sys.exit(1)
 
     print(f"[SYSTEM] Pipeline ready for Camera: {config.camera_id} | Format: {config.plate_format}")
@@ -322,6 +360,8 @@ def main():
             output_video_path=args.output_video,
             max_frames=args.max_frames,
             start_frame=args.start_frame,
+            simulate_camera=args.simulate_camera,
+            loop_stream=args.loop_stream,
         )
     except KeyboardInterrupt:
         print("\n[INFO] User interrupted pipeline. Finalizing and saving outputs...")
