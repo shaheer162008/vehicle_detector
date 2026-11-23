@@ -12,7 +12,7 @@ echo " === FastALPR Vehicle Tracking Runner (Linux / macOS / Colab) ==="
 echo "=============================================================================="
 
 # 1. Check Virtual Environment
-if [ -f ".venv/bin/python" ]; then
+if [ -f ".venv/bin/pip" ]; then
     PYTHON=".venv/bin/python"
 else
     if command -v python3 &> /dev/null; then
