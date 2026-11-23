@@ -73,7 +73,7 @@ if [ "$HAS_NVIDIA" = true ]; then
     else
         echo "[OK] CUDA PyTorch already available in environment."
     fi
-    $VENV_PYTHON -m pip install "onnxruntime-gpu>=1.19.0" --no-input --prefer-binary
+    $VENV_PYTHON -m pip install "onnxruntime-gpu>=1.19.0" --no-input --prefer-binary || $VENV_PYTHON -m pip install "onnxruntime>=1.19.0" --no-input --prefer-binary
 else
     echo "[3/4] No NVIDIA GPU detected. Installing CPU-optimized PyTorch and ONNXRuntime..."
     $VENV_PYTHON -m pip install torch torchvision --no-input --prefer-binary
@@ -88,7 +88,7 @@ echo ""
 echo "=============================================================================="
 echo " === Verifying Installation ==="
 echo "=============================================================================="
-$VENV_PYTHON -c "import cv2, torch, ultralytics; dev='GPU: ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'; print(f'[STATUS] PyTorch: {torch.__version__} | Ultralytics: {ultralytics.__version__} | Active Device: {dev}')"
+$VENV_PYTHON -c "import cv2, torch, ultralytics, onnxruntime; dev='GPU: ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'; print(f'[STATUS] PyTorch: {torch.__version__} | Ultralytics: {ultralytics.__version__} | ONNXRuntime: {onnxruntime.__version__} | Active Device: {dev}')"
 
 echo ""
 echo "[SUCCESS] Turnkey installation completed successfully!"

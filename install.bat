@@ -78,7 +78,7 @@ echo.
 echo ==============================================================================
 echo  === Verifying Installation ===
 echo ==============================================================================
-"%VENV_PYTHON%" -c "import cv2, torch, ultralytics; dev='GPU: ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'; print(f'[STATUS] PyTorch: {torch.__version__} | Ultralytics: {ultralytics.__version__} | Active Device: {dev}')"
+"%VENV_PYTHON%" -c "import cv2, torch, ultralytics, onnxruntime; dev='GPU: ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'; print(f'[STATUS] PyTorch: {torch.__version__} | Ultralytics: {ultralytics.__version__} | ONNXRuntime: {onnxruntime.__version__} | Active Device: {dev}')"
 if errorlevel 1 (
     echo [ERROR] Environment verification failed. Check errors above.
     pause
