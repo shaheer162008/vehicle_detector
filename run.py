@@ -363,6 +363,12 @@ def main():
             except Exception as dl_err:
                 print(f"[ERROR] Failed to download demo video: {dl_err}")
                 print("Please provide a valid --source path to a video file.")
+                try:
+                    from IPython import get_ipython
+                    if get_ipython() is not None:
+                        return
+                except Exception:
+                    pass
                 sys.exit(1)
 
     print(f"[SYSTEM] Pipeline ready for Camera: {config.camera_id} | Format: {config.plate_format}")
