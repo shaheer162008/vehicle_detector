@@ -1,7 +1,7 @@
 """
 Neon PostgreSQL Event Sink for FastALPR Pipeline.
 Handles background asynchronous database writes, auto-reconnection with backoff,
-schema bootstrap, and non-blocking queue ingestion.
+schema bootstrap, camera/run lifecycle, and non-blocking queue ingestion.
 """
 
 import os
@@ -9,6 +9,7 @@ import re
 import time
 import queue
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -33,6 +34,13 @@ class PostgresSink:
         self._conn = None
         self.inserted_count: int = 0
         self.failed_count: int = 0
+        # Run lifecycle
+        self._run_id: Optional[str] = None
+        self._camera_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Public lifecycle
+    # ------------------------------------------------------------------
 
     def start(self) -> None:
         """Initializes schema and starts background ingestion worker."""
@@ -42,12 +50,92 @@ class PostgresSink:
         masked = mask_database_url(self.database_url)
         print(f"[POSTGRES] Connecting to Neon: {masked}")
 
-        # Apply schema idempotently at startup
         self._apply_schema()
 
         self.running = True
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
+
+    def register_camera(self, camera_id: str, name: str = "", location: str = "", node_id: str = "") -> None:
+        """Inserts camera row on startup (ON CONFLICT DO NOTHING)."""
+        self._camera_id = camera_id
+        if not self._ensure_connection():
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO cameras (camera_id, name, location, node_id) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (camera_id) DO NOTHING;",
+                    (camera_id, name or None, location or None, node_id or None),
+                )
+        except Exception as e:
+            print(f"[POSTGRES] Camera register note: {e}")
+
+    def start_run(self, run_id: str, camera_id: str, source: str = "") -> None:
+        """Inserts a runs row with status='running'."""
+        self._run_id = run_id
+        if not self._ensure_connection():
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO runs (run_id, camera_id, source, status) "
+                    "VALUES (%s, %s, %s, 'running') ON CONFLICT (run_id) DO NOTHING;",
+                    (run_id, camera_id, source or None),
+                )
+        except Exception as e:
+            print(f"[POSTGRES] Run start note: {e}")
+
+    def finish_run(
+        self,
+        run_id: str,
+        frames: int = 0,
+        fps: float = 0.0,
+        tracks_seen: int = 0,
+        events_emitted: int = 0,
+        status: str = "done",
+    ) -> None:
+        """Updates runs row on completion or crash."""
+        if not self._ensure_connection():
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE runs SET finished_at = now(), frames = %s, fps = %s, "
+                    "tracks_seen = %s, events_emitted = %s, status = %s "
+                    "WHERE run_id = %s;",
+                    (frames, fps, tracks_seen, events_emitted, status, run_id),
+                )
+        except Exception as e:
+            print(f"[POSTGRES] Run finish note: {e}")
+
+    def publish(self, event: Dict[str, Any]) -> None:
+        """Enqueues an event for background insertion without blocking the pipeline."""
+        if not self.running:
+            return
+        try:
+            self.queue.put_nowait(event)
+        except queue.Full:
+            print("[POSTGRES WARNING] Queue is full (1000 items). Dropping DB push for event.")
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Flushes remaining queue items within timeout and cleanly shuts down."""
+        if not self.running:
+            return
+
+        self.running = False
+        try:
+            self.queue.put_nowait(None)  # Sentinel
+        except Exception:
+            pass
+
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=timeout)
+        print(f"[POSTGRES] Saved {self.inserted_count} event(s) to Neon PostgreSQL (failed={self.failed_count}).")
+
+    # ------------------------------------------------------------------
+    # Schema bootstrap
+    # ------------------------------------------------------------------
 
     def _apply_schema(self) -> None:
         """Executes sql/schema.sql on startup with retry for Neon serverless cold starts."""
@@ -67,7 +155,7 @@ class PostgresSink:
                 with psycopg.connect(self.database_url, connect_timeout=10, autocommit=True) as conn:
                     with conn.cursor() as cur:
                         cur.execute(schema_sql)
-                print("[POSTGRES] Schema successfully applied (CREATE TABLE IF NOT EXISTS events).")
+                print("[POSTGRES] Schema successfully applied (cameras, runs, events).")
                 return
             except Exception as e:
                 last_err = e
@@ -75,6 +163,10 @@ class PostgresSink:
                 time.sleep(backoffs[attempt])
 
         print(f"[POSTGRES ERROR] Failed to apply schema after retries: {last_err}")
+
+    # ------------------------------------------------------------------
+    # Connection management
+    # ------------------------------------------------------------------
 
     def _ensure_connection(self) -> bool:
         """Verifies or reconnects to Neon Postgres with exponential backoff (1s, 2s, 4s)."""
@@ -103,17 +195,12 @@ class PostgresSink:
                 time.sleep(backoffs[attempt])
         return False
 
-    def publish(self, event: Dict[str, Any]) -> None:
-        """Enqueues an event for background insertion without blocking the pipeline."""
-        if not self.running:
-            return
-        try:
-            self.queue.put_nowait(event)
-        except queue.Full:
-            print("[POSTGRES WARNING] Queue is full (1000 items). Dropping DB push for event.")
+    # ------------------------------------------------------------------
+    # Background worker
+    # ------------------------------------------------------------------
 
     def _worker_loop(self) -> None:
-        """Background thread worker pulling events from queue and inserting into Neon."""
+        """Background thread pulling events from queue and inserting into Neon."""
         insert_sql = """
         INSERT INTO events (
             event_id,
@@ -124,8 +211,12 @@ class PostgresSink:
             snapshot_number_plate,
             plate_detection_confidence,
             number_plate,
-            number_plate_confidence
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            number_plate_confidence,
+            run_id,
+            s3_bucket,
+            vehicle_key,
+            plate_key
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (event_id) DO NOTHING;
         """
 
@@ -144,20 +235,28 @@ class PostgresSink:
                     self.failed_count += 1
                     continue
 
-                # Prepare ISO timestamp from event date and time
+                # Build TIMESTAMPTZ from event date + time
                 event_date = event.get("date")
-                event_time = event.get("time")
-                dt_iso = f"{event_date}T{event_time}" if (event_date and event_time) else "now()"
+                event_time_str = event.get("time")
+                try:
+                    dt = datetime.fromisoformat(f"{event_date}T{event_time_str}").astimezone()
+                except Exception:
+                    dt = datetime.now().astimezone()
+
                 params = (
                     event.get("event_id"),
                     event.get("camera_id"),
-                    dt_iso,
+                    dt,
                     event_date,
                     event.get("snapshot_vehicle"),
                     event.get("snapshot_number_plate"),
                     event.get("plate_detection_confidence"),
                     event.get("number_plate"),
                     event.get("number_plate_confidence"),
+                    event.get("run_id"),
+                    event.get("s3_bucket"),
+                    event.get("vehicle_key"),
+                    event.get("plate_key"),
                 )
 
                 try:
@@ -188,18 +287,3 @@ class PostgresSink:
             except Exception:
                 pass
             self._conn = None
-
-    def stop(self, timeout: float = 10.0) -> None:
-        """Flushes remaining queue items within timeout and cleanly shuts down."""
-        if not self.running:
-            return
-
-        self.running = False
-        try:
-            self.queue.put_nowait(None)  # Sentinel
-        except Exception:
-            pass
-
-        if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=timeout)
-        print(f"[POSTGRES] Saved {self.inserted_count} event(s) to Neon PostgreSQL (failed={self.failed_count}).")
