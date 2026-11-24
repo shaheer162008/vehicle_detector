@@ -11,7 +11,10 @@ from typing import List, Optional, Union
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(override=True)
+    _root = Path(__file__).resolve().parent
+    load_dotenv(_root / ".env", override=True)
+    if (_root / ".env.local").exists():
+        load_dotenv(_root / ".env.local", override=True)
 except ImportError:
     pass
 
@@ -93,6 +96,9 @@ class PipelineConfig:
     s3_region: str = field(default_factory=lambda: os.environ.get("AWS_REGION", "us-east-2"))
     s3_bucket: str = field(default_factory=lambda: os.environ.get("S3_BUCKET", "alpr-snapshots"))
     enable_s3: bool = True
+    run_id: str = ""
+    replay_outbox: bool = False
+    no_local_snapshots: bool = False
 
     # Preview & Video Output
     show_preview: bool = True

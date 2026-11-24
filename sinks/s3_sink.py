@@ -1,14 +1,27 @@
 """
 Neon Object Storage (S3-Compatible) Event Sink for FastALPR Pipeline.
-Uploads vehicle snapshots, plate snapshots, events.json, events.jsonl,
-and optional annotated output video to Neon Object Storage using path-style addressing.
+Uploads vehicle snapshots, plate snapshots, per-event manifests, run-level
+events.json, and annotated output video to Neon Object Storage
+using path-style addressing with namespaced keys.
+
+Key layout:
+  {camera_id}/{YYYY-MM-DD}/{event_id}/vehicle.png
+  {camera_id}/{YYYY-MM-DD}/{event_id}/plate.png
+  {camera_id}/{YYYY-MM-DD}/{event_id}/event.json
+  runs/{run_id}/events.json
+  runs/{run_id}/annotated_output.mp4
 """
 
-import queue
-import threading
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
+
+
+def _mask_key(key: str) -> str:
+    """Masks access keys for safe logging."""
+    if not key or len(key) < 10:
+        return "****"
+    return f"{key[:4]}...{key[-4:]}"
 
 
 class S3Sink:
@@ -22,8 +35,8 @@ class S3Sink:
         snapshots_dir: Optional[Path] = None,
         events_json_path: Optional[Path] = None,
         events_jsonl_path: Optional[Path] = None,
-        run_prefix: str = "",
-        max_queue_size: int = 1000,
+        run_id: str = "",
+        camera_id: str = "",
     ):
         self.endpoint_url = endpoint_url
         self.access_key_id = access_key_id
@@ -33,21 +46,13 @@ class S3Sink:
         self.snapshots_dir = Path(snapshots_dir) if snapshots_dir else Path("output/snapshots")
         self.events_json_path = Path(events_json_path) if events_json_path else Path("output/events.json")
         self.events_jsonl_path = Path(events_jsonl_path) if events_jsonl_path else Path("output/events.jsonl")
-        self.run_prefix = run_prefix.strip("/")
-        self.queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
+        self.run_id = run_id
+        self.camera_id = camera_id
         self.running = False
-        self.worker_thread: Optional[threading.Thread] = None
         self._client = None
         self._uploaded_keys: set[str] = set()
         self.uploaded_count: int = 0
         self.failed_count: int = 0
-        self._lock = threading.Lock()
-
-    def _s3_key(self, rel_key: str) -> str:
-        rel_clean = rel_key.lstrip("/")
-        if self.run_prefix:
-            return f"{self.run_prefix}/{rel_clean}"
-        return rel_clean
 
     def _create_client(self):
         import boto3
@@ -83,7 +88,6 @@ class S3Sink:
             print(f"[S3 SINK WARNING] list_buckets note: {e}")
             existing = []
 
-        # Try head_bucket first in case list_buckets is restricted
         try:
             self._client.head_bucket(Bucket=self.bucket_name)
             print(f"[S3 SINK] Connected to Neon S3 bucket '{self.bucket_name}'.")
@@ -91,7 +95,6 @@ class S3Sink:
         except Exception:
             pass
 
-        # Create bucket if missing
         try:
             create_kwargs: Dict[str, Any] = {"Bucket": self.bucket_name}
             if self.region and self.region != "us-east-1":
@@ -99,7 +102,6 @@ class S3Sink:
             try:
                 self._client.create_bucket(**create_kwargs)
             except Exception:
-                # Some S3-compatible providers ignore/reject LocationConstraint
                 self._client.create_bucket(Bucket=self.bucket_name)
             print(f"[S3 SINK] Created and selected Neon S3 bucket '{self.bucket_name}'.")
             return True
@@ -116,9 +118,10 @@ class S3Sink:
             return False
 
     def start(self) -> None:
-        """Initializes Neon S3 client, ensures bucket exists, and starts background uploader."""
+        """Initializes Neon S3 client and ensures bucket exists."""
         if not (self.endpoint_url and self.access_key_id and self.secret_access_key):
             return
+        print(f"[S3 SINK] Connecting: endpoint={self.endpoint_url} key={_mask_key(self.access_key_id)}")
         try:
             self._client = self._create_client()
         except ImportError:
@@ -129,43 +132,55 @@ class S3Sink:
             return
 
         if not self._ensure_bucket():
+            self._client = None
             return
 
         self.running = True
-        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self.worker_thread.start()
 
-    def _enqueue_file(self, local_path: Path, rel_key: str, wait_for_file: bool = True) -> None:
-        if not self.running:
-            return
-        try:
-            self.queue.put_nowait((Path(local_path), rel_key, wait_for_file))
-        except queue.Full:
-            print(f"[S3 SINK WARNING] Upload queue full. Skipping async enqueue for {rel_key}.")
+    # ------------------------------------------------------------------
+    # Namespaced key builders
+    # ------------------------------------------------------------------
 
-    def publish(self, event: Dict[str, Any]) -> None:
-        """Queues snapshots and event manifests associated with an emitted event."""
-        if not self.running:
-            return
+    def event_vehicle_key(self, event: Dict[str, Any]) -> str:
+        """S3 key: {camera_id}/{YYYY-MM-DD}/{event_id}/vehicle.png"""
+        cam = event.get("camera_id") or self.camera_id or "unknown"
+        date = event.get("date") or "unknown"
+        eid = event.get("event_id") or "unknown"
+        return f"{cam}/{date}/{eid}/vehicle.png"
 
-        v_snap = event.get("snapshot_vehicle")
-        if v_snap:
-            v_name = Path(v_snap).name
-            self._enqueue_file(self.snapshots_dir / v_name, f"snapshots/{v_name}", wait_for_file=True)
+    def event_plate_key(self, event: Dict[str, Any]) -> Optional[str]:
+        """S3 key: {camera_id}/{YYYY-MM-DD}/{event_id}/plate.png (None if no plate)."""
+        if not event.get("snapshot_number_plate"):
+            return None
+        cam = event.get("camera_id") or self.camera_id or "unknown"
+        date = event.get("date") or "unknown"
+        eid = event.get("event_id") or "unknown"
+        return f"{cam}/{date}/{eid}/plate.png"
 
-        p_snap = event.get("snapshot_number_plate")
-        if p_snap:
-            p_name = Path(p_snap).name
-            self._enqueue_file(self.snapshots_dir / p_name, f"snapshots/{p_name}", wait_for_file=True)
+    def event_manifest_key(self, event: Dict[str, Any]) -> str:
+        """S3 key: {camera_id}/{YYYY-MM-DD}/{event_id}/event.json"""
+        cam = event.get("camera_id") or self.camera_id or "unknown"
+        date = event.get("date") or "unknown"
+        eid = event.get("event_id") or "unknown"
+        return f"{cam}/{date}/{eid}/event.json"
 
-        if self.events_json_path.exists():
-            self._enqueue_file(self.events_json_path, "events.json", wait_for_file=False)
+    def run_events_key(self) -> str:
+        """S3 key: runs/{run_id}/events.json"""
+        return f"runs/{self.run_id}/events.json"
 
-    def _upload_with_retry(self, local_path: Path, rel_key: str, wait_for_file: bool = True) -> bool:
+    def run_video_key(self) -> str:
+        """S3 key: runs/{run_id}/annotated_output.mp4"""
+        return f"runs/{self.run_id}/annotated_output.mp4"
+
+    # ------------------------------------------------------------------
+    # Synchronous upload & inspection
+    # ------------------------------------------------------------------
+
+    def upload_file_sync(self, local_path: Path, s3_key: str, wait_for_file: bool = True) -> bool:
+        """Synchronously uploads a file to S3 with retry. Returns True on success."""
         if self._client is None:
             return False
 
-        # Wait up to 5s for AsyncSnapshotSaver to flush PNG to disk
         if wait_for_file:
             for _ in range(50):
                 if local_path.exists() and local_path.stat().st_size > 0:
@@ -175,7 +190,6 @@ class S3Sink:
         if not local_path.exists() or not local_path.is_file():
             return False
 
-        s3_key = self._s3_key(rel_key)
         extra_args = {}
         suffix = local_path.suffix.lower()
         if suffix == ".png":
@@ -193,75 +207,66 @@ class S3Sink:
                     self._client.upload_file(str(local_path), self.bucket_name, s3_key, ExtraArgs=extra_args)
                 else:
                     self._client.upload_file(str(local_path), self.bucket_name, s3_key)
-                with self._lock:
-                    self._uploaded_keys.add(s3_key)
-                    self.uploaded_count += 1
+                self._uploaded_keys.add(s3_key)
+                self.uploaded_count += 1
                 return True
             except Exception as e:
                 last_err = e
                 time.sleep(backoffs[attempt])
 
-        with self._lock:
-            self.failed_count += 1
+        self.failed_count += 1
         print(f"[S3 SINK ERROR] Failed uploading {local_path.name} -> {s3_key}: {last_err}")
         return False
 
-    def _worker_loop(self) -> None:
-        while self.running or not self.queue.empty():
-            try:
-                item: Optional[Tuple[Path, str, bool]] = self.queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            if item is None:
-                self.queue.task_done()
-                break
-
-            local_path, rel_key, wait_for_file = item
-            try:
-                self._upload_with_retry(local_path, rel_key, wait_for_file=wait_for_file)
-            finally:
-                self.queue.task_done()
-
-    def upload_file_sync(self, local_path: Path, rel_key: str) -> bool:
-        """Synchronously uploads a finalized artifact (e.g. events.json or annotated_output.mp4)."""
+    def upload_bytes_sync(self, data: bytes, s3_key: str, content_type: str = "application/json") -> bool:
+        """Uploads raw bytes to S3 synchronously with retry."""
         if self._client is None:
             return False
-        ok = self._upload_with_retry(Path(local_path), rel_key, wait_for_file=False)
-        if ok:
-            print(f"[S3 SINK] Uploaded {Path(local_path).name} -> s3://{self.bucket_name}/{self._s3_key(rel_key)}")
-        return ok
+        backoffs = [1, 2, 4]
+        last_err = None
+        for attempt in range(len(backoffs)):
+            try:
+                self._client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=s3_key,
+                    Body=data,
+                    ContentType=content_type,
+                )
+                self._uploaded_keys.add(s3_key)
+                self.uploaded_count += 1
+                return True
+            except Exception as e:
+                last_err = e
+                time.sleep(backoffs[attempt])
+
+        self.failed_count += 1
+        print(f"[S3 SINK ERROR] Failed uploading bytes -> {s3_key}: {last_err}")
+        return False
+
+    def head_object(self, s3_key: str) -> bool:
+        """Returns True if object exists on S3."""
+        if self._client is None or not s3_key:
+            return False
+        try:
+            self._client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            return True
+        except Exception:
+            return False
 
     def sync_final_outputs(self) -> None:
-        """Uploads all remaining snapshots and final events.json / events.jsonl after disk flush."""
-        if self._client is None:
+        """Uploads finalized run-level events.json under runs/{run_id}/events.json."""
+        if self._client is None or not self.run_id:
             return
 
-        if self.snapshots_dir.exists():
-            for img_path in sorted(self.snapshots_dir.glob("*.png")):
-                rel_key = f"snapshots/{img_path.name}"
-                s3_key = self._s3_key(rel_key)
-                with self._lock:
-                    already = s3_key in self._uploaded_keys
-                if not already:
-                    self._upload_with_retry(img_path, rel_key, wait_for_file=False)
-
         if self.events_json_path.exists():
-            self._upload_with_retry(self.events_json_path, "events.json", wait_for_file=False)
-        if self.events_jsonl_path.exists() and self.events_jsonl_path.stat().st_size > 0:
-            self._upload_with_retry(self.events_jsonl_path, "events.jsonl", wait_for_file=False)
+            key = self.run_events_key()
+            ok = self.upload_file_sync(self.events_json_path, key, wait_for_file=False)
+            if ok:
+                print(f"[S3 SINK] Uploaded {self.events_json_path.name} -> s3://{self.bucket_name}/{key}")
 
     def stop(self, timeout: float = 30.0) -> None:
-        """Flushes async queue, performs final snapshot/JSON sync, and closes S3 sink."""
-        if self.running:
-            self.running = False
-            try:
-                self.queue.put_nowait(None)
-            except Exception:
-                pass
-            if self.worker_thread and self.worker_thread.is_alive():
-                self.worker_thread.join(timeout=timeout)
-
+        """Performs final run-level events.json sync and logs summary."""
+        self.running = False
         if self._client is not None:
             self.sync_final_outputs()
             print(

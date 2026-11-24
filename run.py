@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime as _dt
 from pathlib import Path
 
 
@@ -18,6 +19,46 @@ def _purge_stale_modules() -> None:
     for mod_name in list(sys.modules.keys()):
         if mod_name == prefixes or mod_name.startswith(tuple(f"{p}." for p in prefixes)) or mod_name in prefixes:
             sys.modules.pop(mod_name, None)
+
+
+def _clean_output_dir(output_dir: Path, preserve_outbox: bool) -> None:
+    """Cleans previous run artifacts while preserving outbox.jsonl and its referenced snapshots on --replay-outbox."""
+    if not output_dir.exists():
+        return
+
+    outbox_file = output_dir / "outbox.jsonl"
+    if not preserve_outbox or not outbox_file.exists():
+        try:
+            shutil.rmtree(str(output_dir), ignore_errors=True)
+        except Exception as e:
+            print(f"[OUTPUT WARNING] Could not clean output/: {e}")
+        return
+
+    # Collect snapshot filenames referenced by pending outbox entries
+    keep_snapshots: set[str] = set()
+    try:
+        for line in outbox_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            ev = json.loads(line).get("event", {})
+            for key in ("snapshot_vehicle", "snapshot_number_plate"):
+                if ev.get(key):
+                    keep_snapshots.add(Path(ev[key]).name)
+    except Exception:
+        pass
+
+    for item in output_dir.iterdir():
+        if item.name == "outbox.jsonl":
+            continue
+        if item.name == "snapshots" and item.is_dir():
+            for snap in item.iterdir():
+                if snap.is_file() and snap.name not in keep_snapshots:
+                    snap.unlink(missing_ok=True)
+            continue
+        if item.is_dir():
+            shutil.rmtree(str(item), ignore_errors=True)
+        else:
+            item.unlink(missing_ok=True)
 
 
 def parse_args():
@@ -52,6 +93,8 @@ def parse_args():
     parser.add_argument("--no-ws", dest="enable_ws", action="store_false", default=True)
     parser.add_argument("--s3-bucket", type=str, default=None, help="Neon S3 bucket name (defaults to S3_BUCKET or 'alpr-snapshots').")
     parser.add_argument("--no-s3", dest="enable_s3", action="store_false", default=True)
+    parser.add_argument("--replay-outbox", action="store_true", default=False, help="Replay failed events from output/outbox.jsonl at run start.")
+    parser.add_argument("--no-local-snapshots", action="store_true", default=False, help="Delete local snapshots after successful S3 upload + DB insert.")
     parser.add_argument("--no-plate-boxes", dest="draw_plate_boxes", action="store_false", default=True)
     parser.add_argument("--preview", action="store_true", default=True)
     parser.add_argument("--no-preview", dest="preview", action="store_false")
@@ -80,6 +123,9 @@ def main() -> None:
     try:
         from dotenv import load_dotenv
         load_dotenv(Path(repo_root) / ".env", override=True)
+        env_local = Path(repo_root) / ".env.local"
+        if env_local.exists():
+            load_dotenv(env_local, override=True)
     except ImportError:
         pass
 
@@ -88,13 +134,8 @@ def main() -> None:
 
     args = parse_args()
 
-    # Clean old output directory unless --keep-output is set
-    output_dir = Path("output")
-    if not args.keep_output and output_dir.exists():
-        try:
-            shutil.rmtree(str(output_dir), ignore_errors=True)
-        except Exception as e:
-            print(f"[OUTPUT WARNING] Could not clean output/: {e}")
+    if not args.keep_output:
+        _clean_output_dir(Path("output"), preserve_outbox=args.replay_outbox)
 
     roi_poly = None
     if args.roi:
@@ -107,6 +148,8 @@ def main() -> None:
     if ws_port is None:
         ws_env = os.environ.get("WS_PORT", "8765")
         ws_port = int(ws_env) if ws_env else 8765
+
+    run_id = _dt.now().strftime("%Y%m%d-%H%M%S")
 
     config = PipelineConfig(
         camera_id=args.camera_id,
@@ -141,6 +184,9 @@ def main() -> None:
         s3_region=os.environ.get("AWS_REGION", "us-east-2"),
         s3_bucket=args.s3_bucket or os.environ.get("S3_BUCKET", "alpr-snapshots"),
         enable_s3=args.enable_s3,
+        run_id=run_id,
+        replay_outbox=args.replay_outbox,
+        no_local_snapshots=args.no_local_snapshots,
         draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,
     )
@@ -161,8 +207,9 @@ def main() -> None:
             print("[ERROR] No input video source provided. Pass --source <video_or_rtsp>.")
             sys.exit(1)
 
-    print(f"[SYSTEM] Camera: {config.camera_id} | Format: {config.plate_format}")
-    pipeline = VehicleALPRPipeline(config=config)
+    print(f"[SYSTEM] Camera: {config.camera_id} | Format: {config.plate_format} | Run: {run_id}")
+    pipeline = VehicleALPRPipeline(config=config, run_id=run_id, video_source=video_source)
+
     try:
         pipeline.process_video(
             video_source=video_source,

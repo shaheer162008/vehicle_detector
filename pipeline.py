@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -180,8 +181,15 @@ class DesktopPreviewWorker:
 
 
 class VehicleALPRPipeline:
-    def __init__(self, config: Optional[PipelineConfig] = None):
+    def __init__(
+        self,
+        config: Optional[PipelineConfig] = None,
+        run_id: Optional[str] = None,
+        video_source: Optional[str] = None,
+    ):
         self.config = config or PipelineConfig()
+        self.run_id = run_id or getattr(self.config, "run_id", "") or datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.video_source = video_source
         self.vehicle_model = None
         self.alpr = None
         self.byte_tracker = None
@@ -201,6 +209,9 @@ class VehicleALPRPipeline:
             snapshots_dir=self.config.snapshots_dir,
             events_json_path=self.config.events_json_path,
             events_jsonl_path=self.config.events_jsonl_path,
+            run_id=self.run_id,
+            camera_id=self.config.camera_id,
+            no_local_snapshots=getattr(self.config, "no_local_snapshots", False),
         )
         self.tracker_manager = VehicleTrackerManager(self.config, event_bus=self.event_bus)
         self.preview_worker: Optional[ColabLivePreviewWorker | DesktopPreviewWorker] = None
@@ -479,30 +490,43 @@ class VehicleALPRPipeline:
         """Processes video end-to-end with single-pass YOLO + ByteTrack and fan-out sinks."""
         self.initialize_models()
         self._init_byte_tracker()
-        self.event_bus.start()
+        self.event_bus.start(
+            camera_id=self.config.camera_id,
+            camera_name=getattr(self.config, "camera_name", ""),
+            camera_location=getattr(self.config, "camera_location", ""),
+            node_id=getattr(self.config, "node_id", "A"),
+            run_id=self.run_id,
+            source=str(video_source or self.video_source or ""),
+        )
+        if getattr(self.config, "replay_outbox", False):
+            self.event_bus.replay_outbox()
 
-        cap = self._open_capture(video_source, start_frame)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        expected_duration = total_frames / fps if total_frames > 0 else 0.0
-
+        cap = None
         writer, raw_output_path, frames_written = None, None, 0
-        if self.config.save_video and output_video_path is not None:
-            out_p = Path(output_video_path)
-            out_p.parent.mkdir(parents=True, exist_ok=True)
-            raw_output_path = out_p.with_name("raw_" + out_p.name)
-            writer = cv2.VideoWriter(str(raw_output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-
-        self._start_preview_worker()
-        print(f"[PROCESS] {width}x{height} @ {fps:.1f} FPS | {total_frames} frames ({expected_duration:.2f}s)")
-
-        frame_idx, rolling_fps, fps_t0, fps_cnt = 0, fps, time.time(), 0
+        frame_idx = 0
         prof = {"detect": 0.0, "track": 0.0, "alpr": 0.0, "render": 0.0}
         wall_t0 = time.perf_counter()
+        run_status = "done"
+        completed = False
 
         try:
+            cap = self._open_capture(video_source, start_frame)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            expected_duration = total_frames / fps if total_frames > 0 else 0.0
+
+            if self.config.save_video and output_video_path is not None:
+                out_p = Path(output_video_path)
+                out_p.parent.mkdir(parents=True, exist_ok=True)
+                raw_output_path = out_p.with_name("raw_" + out_p.name)
+                writer = cv2.VideoWriter(str(raw_output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+
+            self._start_preview_worker()
+            print(f"[PROCESS] {width}x{height} @ {fps:.1f} FPS | {total_frames} frames ({expected_duration:.2f}s)")
+
+            rolling_fps, fps_t0, fps_cnt = fps, time.time(), 0
             while cap.isOpened():
                 if max_frames and frame_idx >= max_frames:
                     break
@@ -580,22 +604,49 @@ class VehicleALPRPipeline:
                 if frame_idx % 60 == 0 or frame_idx == 1:
                     u, p, np_c, act, sm = self.tracker_manager.get_counts()
                     print(f"[FRAME {frame_idx:05d}/{total_frames}] FPS:{rolling_fps:4.1f} | Vehicles:{u} (Plates:{p}, NoPlate:{np_c}) | Active:{act} | Small:{sm}")
+            completed = True
+        except KeyboardInterrupt:
+            run_status = "done"
+            raise
+        except Exception:
+            run_status = "failed"
+            raise
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
             if self.preview_worker is not None:
                 self.preview_worker.stop()
             self.tracker_manager.check_and_emit_events(frame_idx, force_all=True)
             if writer is not None:
                 writer.release()
             self.tracker_manager.snapshot_saver.stop()
+            self.event_bus.stop(timeout=30.0)
             self._cleanup_unreferenced_snapshots()
-            self.event_bus.stop(timeout=15.0)
-            print(self.event_bus.get_status_str())
+            if not completed:
+                wall_s = time.perf_counter() - wall_t0
+                self.event_bus.finish_run(
+                    frames=frame_idx,
+                    fps=round(frame_idx / max(1e-5, wall_s), 2),
+                    tracks_seen=self.tracker_manager.total_tracks_seen,
+                    events_emitted=len(self.tracker_manager.emitted_events),
+                    status=run_status,
+                )
+                print(self.event_bus.get_status_str())
+                self.event_bus.close_db()
 
         if raw_output_path is not None and raw_output_path.exists():
             self._finalize_video(raw_output_path, Path(output_video_path))
 
         wall_s = time.perf_counter() - wall_t0
+        self.event_bus.finish_run(
+            frames=frame_idx,
+            fps=round(frame_idx / max(1e-5, wall_s), 2),
+            tracks_seen=self.tracker_manager.total_tracks_seen,
+            events_emitted=len(self.tracker_manager.emitted_events),
+            status=run_status,
+        )
+        print(self.event_bus.get_status_str())
+        self.event_bus.close_db()
         print(
             f"\n[SUMMARY] frames={frame_idx} time={wall_s:.2f}s ({frame_idx/max(1e-5,wall_s):.1f} FPS) | "
             f"tracks_seen={self.tracker_manager.total_tracks_seen} "
