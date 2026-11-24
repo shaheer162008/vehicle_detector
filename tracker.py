@@ -420,7 +420,7 @@ def character_level_voting(
     # Group by length to find majority plate length
     length_votes = defaultdict(float)
     for text, conf, _ in valid_readings:
-        length_votes[len(text)] += (conf ** 2)
+        length_votes[len(text)] += (conf ** 4)
 
     best_len = max(length_votes.keys(), key=lambda l: length_votes[l])
     same_len_readings = [r for r in valid_readings if len(r[0]) == best_len]
@@ -435,7 +435,7 @@ def character_level_voting(
 
         for text, conf, p_confs in same_len_readings:
             char = text[pos]
-            weight = (conf ** 2) * pos_multiplier
+            weight = (conf ** 4) * pos_multiplier
             pos_votes[char] += weight
 
         total_weight = sum(pos_votes.values())
@@ -543,10 +543,12 @@ class TrackState:
     # Lifecycle flags
     has_event_emitted: bool = False
     plate_confident_reached: bool = False
+    has_unclipped_high_conf_plate: bool = False
     # Plate box visualization in video (Part B)
     last_plate_box_frame: Optional[List[float]] = None
     last_plate_box_frame_idx: int = -1
     plate_rel_box: Optional[List[float]] = None
+    plate_anchor: Optional[dict] = None
     kalman_box: Optional[List[float]] = None
 
 
@@ -712,11 +714,12 @@ class VehicleTrackerManager:
             track = self.tracks[track_id]
             track.kalman_box = kalman_box
 
-            # Spatial Jump Check
-            if track.last_center is not None and track.frames_tracked > 2:
+            # Spatial Jump Check: Never clear a locked confident plate, and ignore border-clipping center shifts
+            if track.last_center is not None and track.frames_tracked > 2 and not track.plate_confident_reached:
                 prev_cx, prev_cy = track.last_center
                 jump_dist = math.hypot(cx - prev_cx, cy - prev_cy)
-                if jump_dist > self.config.max_spatial_jump_px:
+                border_clipped = (rx1 <= 8.0) or (ry1 <= 8.0) or (rx2 >= float(w) - 8.0) or (ry2 >= float(h) - 8.0)
+                if not border_clipped and jump_dist > self.config.max_spatial_jump_px:
                     track.plate_readings.clear()
                     track.best_plate_text = None
                     track.best_plate_conf = None
@@ -850,7 +853,8 @@ class VehicleTrackerManager:
                 return
 
         # Keep last plate box visible for visualization (Part B)
-        if plate_bbox_frame is not None:
+        if plate_bbox_frame is not None and not track.plate_confident_reached:
+            h_f_vis, w_f_vis = frame.shape[:2]
             track.last_plate_box_frame = [float(v) for v in plate_bbox_frame]
             track.last_plate_box_frame_idx = frame_idx
             vbox = track.frame_boxes.get(frame_idx) or track.raw_box or track.smoothed_box
@@ -858,13 +862,24 @@ class VehicleTrackerManager:
                 vx1, vy1, vx2, vy2 = vbox
                 vw = max(1.0, vx2 - vx1)
                 vh = max(1.0, vy2 - vy1)
-                px1, py1, px2, py2 = plate_bbox_frame
-                track.plate_rel_box = [
-                    (px1 - vx1) / vw,
-                    (py1 - vy1) / vh,
-                    (px2 - vx1) / vw,
-                    (py2 - vy1) / vh,
-                ]
+                cur_unclipped = (vy1 > 3.0) and (vy2 < float(h_f_vis) - 3.0)
+                prev_anchor = getattr(track, "plate_anchor", None)
+                prev_unclipped = bool(prev_anchor and prev_anchor.get("unclipped"))
+                if (not prev_unclipped) or cur_unclipped:
+                    px1, py1, px2, py2 = plate_bbox_frame
+                    track.plate_rel_box = [
+                        (px1 - vx1) / vw,
+                        (py1 - vy1) / vh,
+                        (px2 - vx1) / vw,
+                        (py2 - vy1) / vh,
+                    ]
+                    track.plate_anchor = {
+                        "plate_box": [float(px1), float(py1), float(px2), float(py2)],
+                        "veh_box": [float(vx1), float(vy1), float(vx2), float(vy2)],
+                        "clipped_top": bool(vy1 <= 3.0),
+                        "clipped_bottom": bool(vy2 >= float(h_f_vis) - 3.0),
+                        "unclipped": cur_unclipped,
+                    }
 
         raw_str = str(raw_text).strip().upper()
         if per_char_confs is None or len(per_char_confs) != len(raw_str):
@@ -891,6 +906,15 @@ class VehicleTrackerManager:
         # Plate Mutability Lock: Do not let a conflicting plate overwrite established text
         if track.plate_confident_reached and track.best_plate_text:
             return
+
+        # Ignore degraded border-clipped vehicle reads when a crisp unclipped read already exists
+        h_f_chk, _ = frame.shape[:2]
+        vbox_chk = track.frame_boxes.get(frame_idx) or track.raw_box
+        veh_clipped = bool(vbox_chk is not None and (vbox_chk[1] <= 5.0 or vbox_chk[3] >= float(h_f_chk) - 5.0))
+        if track.has_unclipped_high_conf_plate and veh_clipped and ocr_conf < 0.85:
+            return
+        if (not veh_clipped) and ocr_conf >= 0.85 and len(clean_text) >= self.config.min_plate_length:
+            track.has_unclipped_high_conf_plate = True
 
         sharpness = get_image_sharpness(plate_crop)
         if sharpness < self.config.min_plate_sharpness and track.best_plate_crop is not None:
@@ -940,12 +964,19 @@ class VehicleTrackerManager:
                 track.best_plate_text = voted_text
                 track.best_plate_conf = voted_conf
 
-                if (
+                is_ultra_high_conf = (
+                    "?" not in voted_text
+                    and len(voted_text) >= self.config.min_plate_length
+                    and voted_conf >= 0.88
+                    and actual_plate_w >= 60
+                )
+                is_multi_read_conf = (
                     "?" not in voted_text
                     and len(voted_text) >= self.config.min_plate_length
                     and voted_conf >= self.config.min_confident_plate_conf
                     and len(track.plate_readings) >= self.config.min_plate_reads_for_event
-                ):
+                )
+                if is_ultra_high_conf or is_multi_read_conf:
                     track.plate_confident_reached = True
 
     def match_and_update_plates(
@@ -1104,11 +1135,26 @@ class VehicleTrackerManager:
         if iou >= 0.30:
             return True, iou, gap
 
-        # Centre distance check (<= 0.75 * box diagonal)
+        # Below iou >= 0.30, enforce strict spatial/size/plate sanity guards so distinct cars never merge
         c1_x = (b1[0] + b1[2]) / 2.0
         c1_y = (b1[1] + b1[3]) / 2.0
         c2_x = (b2[0] + b2[2]) / 2.0
         c2_y = (b2[1] + b2[3]) / 2.0
+
+        # 4. Exit-to-entry guard: car exiting top edge (y1 <= 40) cannot reappear much lower (c2_y > c1_y + 80)
+        if b1[1] <= 40.0 and (c2_y - c1_y) > 80.0:
+            return False, iou, gap
+
+        # 5. Box area ratio guard: sliver/far box cannot stitch with full-size vehicle when iou < 0.30
+        if area1 <= 0.0 or area2 <= 0.0:
+            return False, iou, gap
+        if (max(area1, area2) / min(area1, area2)) > 2.2:
+            return False, iou, gap
+
+        # 6. Plated vs unplated guard: do not absorb an unplated edge/partial track into a plated car without overlap
+        if bool(t1.best_plate_text) != bool(t2.best_plate_text) and iou < 0.10:
+            return False, iou, gap
+
         center_dist = math.hypot(c1_x - c2_x, c1_y - c2_y)
 
         w1 = max(0.0, b1[2] - b1[0])
@@ -1119,7 +1165,7 @@ class VehicleTrackerManager:
         h2 = max(0.0, b2[3] - b2[1])
         diag2 = math.hypot(w2, h2)
 
-        box_diag = max(diag1, diag2)
+        box_diag = min(diag1, diag2)
         if box_diag > 0 and center_dist <= 0.75 * box_diag:
             return True, iou, gap
 
@@ -1180,8 +1226,13 @@ class VehicleTrackerManager:
             ):
                 survivor.last_plate_box_frame = absorbed.last_plate_box_frame
                 survivor.last_plate_box_frame_idx = absorbed.last_plate_box_frame_idx
-                if getattr(absorbed, "plate_rel_box", None) is not None:
+                if getattr(absorbed, "plate_rel_box", None) is not None and getattr(survivor, "plate_rel_box", None) is None:
                     survivor.plate_rel_box = absorbed.plate_rel_box
+                if getattr(absorbed, "plate_anchor", None) is not None:
+                    surv_unclipped = bool(getattr(survivor, "plate_anchor", None) and survivor.plate_anchor.get("unclipped"))
+                    abs_unclipped = bool(absorbed.plate_anchor.get("unclipped"))
+                    if getattr(survivor, "plate_anchor", None) is None or (abs_unclipped and not surv_unclipped):
+                        survivor.plate_anchor = absorbed.plate_anchor
 
         # Plate lock: preserve locked plate on survivor or absorbed (NO cross-track voting)
         if survivor.plate_confident_reached and survivor.best_plate_text:

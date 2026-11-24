@@ -718,16 +718,27 @@ class VehicleALPRPipeline:
                                             if (pfx1 >= rx1 - 5) and (pfy1 >= ry1 - 5) and (pfx2 <= rx2 + 5) and (pfy2 <= ry2 + 5):
                                                 t.current_frame_candidate["plate_inside"] = True
 
-                                        if t.raw_box is not None:
+                                        if t.raw_box is not None and not t.plate_confident_reached:
                                             rx1, ry1, rx2, ry2 = t.raw_box
                                             rw = max(1.0, rx2 - rx1)
                                             rh = max(1.0, ry2 - ry1)
-                                            t.plate_rel_box = [
-                                                (pfx1 - rx1) / rw,
-                                                (pfy1 - ry1) / rh,
-                                                (pfx2 - rx1) / rw,
-                                                (pfy2 - ry1) / rh,
-                                            ]
+                                            cur_unclipped = (ry1 > 3.0) and (ry2 < float(h_f) - 3.0)
+                                            prev_anchor = getattr(t, "plate_anchor", None)
+                                            prev_unclipped = bool(prev_anchor and prev_anchor.get("unclipped"))
+                                            if (not prev_unclipped) or cur_unclipped:
+                                                t.plate_rel_box = [
+                                                    (pfx1 - rx1) / rw,
+                                                    (pfy1 - ry1) / rh,
+                                                    (pfx2 - rx1) / rw,
+                                                    (pfy2 - ry1) / rh,
+                                                ]
+                                                t.plate_anchor = {
+                                                    "plate_box": [float(pfx1), float(pfy1), float(pfx2), float(pfy2)],
+                                                    "veh_box": [float(rx1), float(ry1), float(rx2), float(ry2)],
+                                                    "clipped_top": bool(ry1 <= 3.0),
+                                                    "clipped_bottom": bool(ry2 >= float(h_f) - 3.0),
+                                                    "unclipped": cur_unclipped,
+                                                }
 
                                         raw_text, ocr_conf, per_char_confs = self._extract_ocr_confidences(
                                             item.ocr, plate_crop, frame_idx
@@ -1155,8 +1166,9 @@ class VehicleALPRPipeline:
                 cv2.LINE_AA,
             )
 
-            # Draw Plate Box in Video (Part B: persistent with relative projection)
+            # Draw Plate Box in Video (Part B: persistent with zero-lag raw box + border-clipping anchoring)
             rel_box = getattr(track, "plate_rel_box", None)
+            anchor = getattr(track, "plate_anchor", None)
             if rel_box is None and track.last_plate_box_frame is not None:
                 ref_vbox = track.frame_boxes.get(track.last_plate_box_frame_idx) or [x1, y1, x2, y2]
                 rx1, ry1, rx2, ry2 = ref_vbox
@@ -1170,14 +1182,51 @@ class VehicleALPRPipeline:
                     (lpy2 - ry1) / rh,
                 ]
                 track.plate_rel_box = rel_box
+                anchor = {
+                    "plate_box": [float(lpx1), float(lpy1), float(lpx2), float(lpy2)],
+                    "veh_box": [float(rx1), float(ry1), float(rx2), float(ry2)],
+                    "clipped_top": bool(ry1 <= 3.0),
+                    "clipped_bottom": bool(ry2 >= float(h) - 3.0),
+                    "unclipped": bool(ry1 > 3.0 and ry2 < float(h) - 3.0),
+                }
+                track.plate_anchor = anchor
 
-            if self.config.draw_plate_boxes and rel_box is not None:
-                vw = float(x2 - x1)
-                vh = float(y2 - y1)
-                px1 = x1 + rel_box[0] * vw
-                py1 = y1 + rel_box[1] * vh
-                px2 = x1 + rel_box[2] * vw
-                py2 = y1 + rel_box[3] * vh
+            if self.config.draw_plate_boxes and (rel_box is not None or anchor is not None):
+                ref_b = track.raw_box if (track.disappeared_count == 0 and track.raw_box is not None) else box_to_draw
+                bx1, by1, bx2, by2 = [float(v) for v in ref_b]
+                bx1, by1 = max(0.0, bx1), max(0.0, by1)
+                bx2, by2 = min(float(w), bx2), min(float(h), by2)
+                vw = max(1.0, bx2 - bx1)
+                vh = max(1.0, by2 - by1)
+
+                cur_top_clip = by1 <= 3.0
+                cur_bot_clip = by2 >= float(h) - 3.0
+                if anchor is not None:
+                    ax1, ay1, ax2, ay2 = anchor["veh_box"]
+                    apx1, apy1, apx2, apy2 = anchor["plate_box"]
+                    aw = max(1.0, ax2 - ax1)
+                    ah = max(1.0, ay2 - ay1)
+                    scale_w = vw / aw
+                    px1 = bx1 + ((apx1 - ax1) / aw) * vw
+                    px2 = bx1 + ((apx2 - ax1) / aw) * vw
+
+                    if cur_top_clip and not cur_bot_clip and not anchor.get("clipped_bottom", False):
+                        p_h = (apy2 - apy1) * scale_w
+                        py2 = by2 - (ay2 - apy2) * scale_w
+                        py1 = py2 - p_h
+                    elif cur_bot_clip and not cur_top_clip and not anchor.get("clipped_top", False):
+                        p_h = (apy2 - apy1) * scale_w
+                        py1 = by1 + (apy1 - ay1) * scale_w
+                        py2 = py1 + p_h
+                    else:
+                        py1 = by1 + ((apy1 - ay1) / ah) * vh
+                        py2 = by1 + ((apy2 - ay1) / ah) * vh
+                else:
+                    px1 = bx1 + rel_box[0] * vw
+                    py1 = by1 + rel_box[1] * vh
+                    px2 = bx1 + rel_box[2] * vw
+                    py2 = by1 + rel_box[3] * vh
+
                 px1, py1 = max(0, int(px1)), max(0, int(py1))
                 px2, py2 = min(w, int(px2)), min(h, int(py2))
 
