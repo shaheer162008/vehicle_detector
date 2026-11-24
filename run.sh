@@ -1,94 +1,142 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FastALPR Vehicle Tracking - Run Script (Linux / macOS / Google Colab)
-#
-# What it does:
-#   1. Downloads the input video from Google Drive (skips if already downloaded)
-#   2. Runs the vehicle detection + plate tracking pipeline on that video
-#   3. Prints the path of the annotated / tracked output video
-#
-# Usage:
-#   ./run.sh                     <- download video from Google Drive and track it
-#   ./run.sh /path/to/car.mp4    <- track a local video instead
+# FastALPR Vehicle Tracking - Run Script (Linux / Google Colab / Boss PC)
 # ==============================================================================
 
 set -e
 
 cd "$(dirname "$0")"
 
+# Load .env if present
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source ".env"
+    set +a
+fi
+
+OUTPUT_VIDEO="output/annotated_output.mp4"
 DRIVE_FILE_ID="1szprqeBN3eQ5vBcRJ8HVIowMu514F94L"
 VIDEO_DIR="videos"
-VIDEO_PATH="$VIDEO_DIR/drive_input.mp4"
-OUTPUT_VIDEO="output/annotated_output.mp4"
 
+echo "================================================="
 echo "=== FastALPR Vehicle Tracking Run Script ==="
+echo "================================================="
 
-# 0. Python check
+# 1. Python environment detection
 PYTHON_CMD="python3"
-if ! command -v python3 &> /dev/null; then
+if [ -f ".venv/bin/python" ]; then
+    PYTHON_CMD=".venv/bin/python"
+elif ! command -v python3 &> /dev/null; then
     PYTHON_CMD="python"
 fi
-echo "[INFO] Using Python: $($PYTHON_CMD --version)"
 
-# 0b. Dependency check (install.sh installs these)
-if ! $PYTHON_CMD -c "import cv2, ultralytics, fast_alpr" &> /dev/null; then
-    echo "[WARNING] Required packages look missing. Run install.sh once, then re-run this script."
+# 2. Check GPU acceleration (fail early, never run silently on CPU)
+echo "[CHECK] Verifying GPU hardware and execution providers..."
+if ! $PYTHON_CMD tools/check_gpu.py; then
+    echo ""
+    echo "[ERROR] GPU check failed. Execution halted to prevent slow CPU execution."
+    exit 1
 fi
+echo ""
 
-# 1. gdown is only needed for the Google Drive download
-if ! $PYTHON_CMD -c "import gdown" &> /dev/null; then
-    echo "[1/4] Installing gdown (Google Drive downloader)..."
-    $PYTHON_CMD -m pip install gdown --no-input --quiet
-fi
+# 3. Video Selection Menu or Argument Handling
+VIDEO_PATH=""
+ARG1="$1"
 
-# 2. Pick the input video: custom local path if given, else Google Drive download
-if [ -n "$1" ]; then
-    VIDEO_PATH="$1"
-    echo "[2/4] Using local video: $VIDEO_PATH"
-else
+if [ "$ARG1" = "1" ]; then
+    VIDEO_PATH="stream_2.mp4"
+elif [ "$ARG1" = "2" ]; then
+    VIDEO_PATH="stream.mp4"
+elif [ "$ARG1" = "3" ]; then
     mkdir -p "$VIDEO_DIR"
-    if [ -f "$VIDEO_PATH" ]; then
-        echo "[2/4] Video already present: $VIDEO_PATH"
-    else
-        echo "[2/4] Downloading video from Google Drive..."
-        if ! $PYTHON_CMD -c "import gdown; gdown.download(id='$DRIVE_FILE_ID', output='$VIDEO_PATH', quiet=False)"; then
-            echo "[ERROR] Google Drive download failed."
-            echo "        Make sure the file sharing is set to \"Anyone with the link\"."
-            exit 1
+    VIDEO_PATH="$VIDEO_DIR/drive_input.mp4"
+    if [ ! -f "$VIDEO_PATH" ]; then
+        echo "[INFO] Downloading Google Drive video ($DRIVE_FILE_ID)..."
+        $PYTHON_CMD -c "import gdown; gdown.download(id='$DRIVE_FILE_ID', output='$VIDEO_PATH', quiet=False)"
+    fi
+elif [ "$ARG1" = "4" ] && [ -n "$2" ]; then
+    VIDEO_PATH="$2"
+elif [ -n "$ARG1" ]; then
+    VIDEO_PATH="$ARG1"
+else
+    echo "================================================="
+    echo "            FAST-ALPR VIDEO SOURCE MENU"
+    echo "================================================="
+    echo "  1) stream_2.mp4 (repo)"
+    echo "  2) stream.mp4 (repo)"
+    echo "  3) Google Drive video (ID: 1szprqeBN3eQ5vBcRJ8HVIowMu514F94L)"
+    echo "  4) Custom video path"
+    echo "================================================="
+    read -r -p "Choose video source [1-4] (default 1): " V_CHOICE
+    V_CHOICE=${V_CHOICE:-1}
+
+    if [ "$V_CHOICE" = "1" ]; then
+        VIDEO_PATH="stream_2.mp4"
+    elif [ "$V_CHOICE" = "2" ]; then
+        VIDEO_PATH="stream.mp4"
+    elif [ "$V_CHOICE" = "3" ]; then
+        mkdir -p "$VIDEO_DIR"
+        VIDEO_PATH="$VIDEO_DIR/drive_input.mp4"
+        if [ ! -f "$VIDEO_PATH" ]; then
+            echo "[INFO] Downloading Google Drive video ($DRIVE_FILE_ID)..."
+            $PYTHON_CMD -c "import gdown; gdown.download(id='$DRIVE_FILE_ID', output='$VIDEO_PATH', quiet=False)"
         fi
+    elif [ "$V_CHOICE" = "4" ]; then
+        read -r -p "Enter custom video path: " VIDEO_PATH
+    else
+        VIDEO_PATH="stream_2.mp4"
     fi
 fi
 
 if [ ! -f "$VIDEO_PATH" ]; then
-    echo "[ERROR] Input video not found: $VIDEO_PATH"
-    exit 1
-fi
-if [ ! -s "$VIDEO_PATH" ]; then
-    echo "[ERROR] Input video file is empty (0 bytes): $VIDEO_PATH"
-    echo "        Delete it and re-run to download again."
+    echo "[ERROR] Video file not found: $VIDEO_PATH"
     exit 1
 fi
 
-# 3. Run the tracking pipeline (annotated video is written by run.py)
-echo "[3/4] Running ALPR tracking pipeline on: $VIDEO_PATH"
+# 4. Plate Format Selection Menu
+PLATE_FORMAT="GENERAL"
+if [ "$ARG1" = "1" ] && [ -n "$2" ]; then
+    PLATE_FORMAT="$2"
+elif [ "$ARG1" = "2" ] && [ -n "$2" ]; then
+    PLATE_FORMAT="$2"
+elif [ "$ARG1" = "3" ] && [ -n "$2" ]; then
+    PLATE_FORMAT="$2"
+elif [ "$ARG1" = "4" ] && [ -n "$3" ]; then
+    PLATE_FORMAT="$3"
+elif [ -t 0 ]; then
+    echo ""
+    echo "================================================="
+    echo "             PLATE FORMAT MENU"
+    echo "================================================="
+    echo "  1) GENERAL (Default)"
+    echo "  2) UK"
+    echo "  3) PAKISTAN"
+    echo "================================================="
+    read -r -p "Choose plate format [1-3] (default 1): " F_CHOICE
+    F_CHOICE=${F_CHOICE:-1}
+
+    if [ "$F_CHOICE" = "1" ]; then
+        PLATE_FORMAT="GENERAL"
+    elif [ "$F_CHOICE" = "2" ]; then
+        PLATE_FORMAT="UK"
+    elif [ "$F_CHOICE" = "3" ]; then
+        PLATE_FORMAT="PAKISTAN"
+    fi
+fi
+
 echo ""
-set +e
-$PYTHON_CMD run.py --source "$VIDEO_PATH" --output-video "$OUTPUT_VIDEO"
-PIPELINE_STATUS=$?
-set -e
-if [ $PIPELINE_STATUS -ne 0 ]; then
-    echo "[ERROR] Pipeline run failed. See messages above."
-    exit $PIPELINE_STATUS
-fi
+echo "[RUN] Source: $VIDEO_PATH"
+echo "[RUN] Format: $PLATE_FORMAT"
+echo "[RUN] Output Video: $OUTPUT_VIDEO"
+echo ""
 
-# 4. Report the tracked video
-if [ -f "$OUTPUT_VIDEO" ]; then
-    echo "[4/4] Tracked video ready: $OUTPUT_VIDEO"
-else
-    echo "[WARNING] Output video not found at: $OUTPUT_VIDEO"
-fi
+$PYTHON_CMD run.py --source "$VIDEO_PATH" --output-video "$OUTPUT_VIDEO" --plate-format "$PLATE_FORMAT" --preview
 
-echo "=== Finished ==="
-echo "Tracked video : $OUTPUT_VIDEO"
-echo "Snapshots     : output/snapshots"
-echo "Events JSON   : output/events.json"
+echo ""
+echo "================================================="
+echo "=== Run Completed Successfully ==="
+echo "Annotated Video: $OUTPUT_VIDEO"
+echo "Events JSON    : output/events.json"
+echo "Snapshots      : output/snapshots"
+echo "================================================="
