@@ -21,6 +21,26 @@ def _purge_stale_modules() -> None:
             sys.modules.pop(mod_name, None)
 
 
+def _check_onnx_cuda_warning() -> None:
+    """Warns once if PyTorch CUDA is available while ONNX Runtime lacks CUDAExecutionProvider."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        import onnxruntime as ort
+
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            print("[WARN] ONNX CPU par chal raha hai (onnxruntime-gpu install nahi) - OCR/plate detector slow")
+    except Exception:
+        pass
+
+
 def _clean_output_dir(output_dir: Path, preserve_outbox: bool) -> None:
     """Cleans previous run artifacts while preserving outbox.jsonl and its referenced snapshots on --replay-outbox."""
     if not output_dir.exists():
@@ -208,6 +228,7 @@ def main() -> None:
             sys.exit(1)
 
     print(f"[SYSTEM] Camera: {config.camera_id} | Format: {config.plate_format} | Run: {run_id}")
+    _check_onnx_cuda_warning()
     pipeline = VehicleALPRPipeline(config=config, run_id=run_id, video_source=video_source)
 
     try:

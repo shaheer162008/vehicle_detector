@@ -17,6 +17,17 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 
+def check_boto3_available(announce: bool = True) -> bool:
+    """Checks boto3 availability without creating an S3 client or retrying."""
+    try:
+        import boto3  # noqa: F401
+        return True
+    except ImportError:
+        if announce:
+            print('[PREFLIGHT] s3 OFF: boto3 install nahi (pip install "boto3>=1.34.0")')
+        return False
+
+
 def _mask_key(key: str) -> str:
     """Masks access keys for safe logging."""
     if not key or len(key) < 10:
@@ -50,6 +61,7 @@ class S3Sink:
         self.camera_id = camera_id
         self.running = False
         self._client = None
+        self.off_reason: str = ""
         self._uploaded_keys: set[str] = set()
         self.uploaded_count: int = 0
         self.failed_count: int = 0
@@ -78,6 +90,7 @@ class S3Sink:
         """Ensures target S3 bucket exists or resolves an available bucket on Neon Object Storage."""
         if self._client is None:
             return False
+        existing: list[str] = []
         try:
             resp = self._client.list_buckets()
             existing = [b["Name"] for b in resp.get("Buckets", []) if b.get("Name")]
@@ -86,14 +99,16 @@ class S3Sink:
                 return True
         except Exception as e:
             print(f"[S3 SINK WARNING] list_buckets note: {e}")
-            existing = []
 
         try:
             self._client.head_bucket(Bucket=self.bucket_name)
             print(f"[S3 SINK] Connected to Neon S3 bucket '{self.bucket_name}'.")
             return True
-        except Exception:
-            pass
+        except Exception as head_err:
+            code = str(getattr(head_err, "response", {}).get("Error", {}).get("Code", ""))
+            if code not in ("404", "NoSuchBucket", "NotFound") and not existing:
+                print(f"[S3 SINK ERROR] Bucket '{self.bucket_name}' unreachable: {head_err}")
+                return False
 
         try:
             create_kwargs: Dict[str, Any] = {"Bucket": self.bucket_name}
@@ -117,25 +132,33 @@ class S3Sink:
             print(f"[S3 SINK ERROR] Bucket '{self.bucket_name}' unavailable and could not be created: {e}")
             return False
 
-    def start(self) -> None:
-        """Initializes Neon S3 client and ensures bucket exists."""
+    def start(self) -> bool:
+        """Initializes Neon S3 client and ensures bucket exists. Never retries on ImportError."""
         if not (self.endpoint_url and self.access_key_id and self.secret_access_key):
-            return
+            self.off_reason = "not configured"
+            return False
+        if not check_boto3_available(announce=True):
+            self.off_reason = "boto3 missing"
+            return False
+
         print(f"[S3 SINK] Connecting: endpoint={self.endpoint_url} key={_mask_key(self.access_key_id)}")
         try:
             self._client = self._create_client()
         except ImportError:
-            print("[S3 SINK ERROR] boto3 is not installed. Run: pip install boto3")
-            return
+            self.off_reason = "boto3 missing"
+            return False
         except Exception as e:
+            self.off_reason = "connect failed"
             print(f"[S3 SINK ERROR] Could not initialize boto3 client: {e}")
-            return
+            return False
 
         if not self._ensure_bucket():
             self._client = None
-            return
+            self.off_reason = "connect failed"
+            return False
 
         self.running = True
+        return True
 
     # ------------------------------------------------------------------
     # Namespaced key builders

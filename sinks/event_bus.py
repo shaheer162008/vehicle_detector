@@ -10,8 +10,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-from .postgres_sink import PostgresSink
-from .s3_sink import S3Sink
+from .postgres_sink import PostgresSink, check_psycopg_available
+from .s3_sink import S3Sink, check_boto3_available
 from .ws_sink import WebSocketSink
 
 
@@ -50,29 +50,48 @@ class EventBus:
         self.s3_sink: Optional[S3Sink] = None
         self.ws_sink: Optional[WebSocketSink] = None
 
+        self._pg_off_reason: str = "not configured"
+        self._s3_off_reason: str = "disabled" if not enable_s3 else "not configured"
+        self._ws_off_reason: str = "disabled" if not enable_ws else "not configured"
+
+        # Preflight dependency checks before initializing/starting any sink
         if self.database_url:
-            self.postgres_sink = PostgresSink(
-                database_url=self.database_url,
-                on_insert_success=self._on_db_insert_success,
-                on_insert_failure=self._on_db_insert_failure,
-            )
+            if check_psycopg_available(announce=True):
+                self._pg_off_reason = ""
+                self.postgres_sink = PostgresSink(
+                    database_url=self.database_url,
+                    on_insert_success=self._on_db_insert_success,
+                    on_insert_failure=self._on_db_insert_failure,
+                )
+            else:
+                self._pg_off_reason = "psycopg missing"
 
         if enable_s3 and s3_endpoint_url and s3_access_key_id and s3_secret_access_key:
-            self.s3_sink = S3Sink(
-                endpoint_url=s3_endpoint_url,
-                access_key_id=s3_access_key_id,
-                secret_access_key=s3_secret_access_key,
-                region=s3_region,
-                bucket_name=s3_bucket,
-                snapshots_dir=self.snapshots_dir,
-                events_json_path=self.events_json_path,
-                events_jsonl_path=events_jsonl_path,
-                run_id=run_id,
-                camera_id=camera_id,
-            )
+            if check_boto3_available(announce=True):
+                self._s3_off_reason = ""
+                self.s3_sink = S3Sink(
+                    endpoint_url=s3_endpoint_url,
+                    access_key_id=s3_access_key_id,
+                    secret_access_key=s3_secret_access_key,
+                    region=s3_region,
+                    bucket_name=s3_bucket,
+                    snapshots_dir=self.snapshots_dir,
+                    events_json_path=self.events_json_path,
+                    events_jsonl_path=events_jsonl_path,
+                    run_id=run_id,
+                    camera_id=camera_id,
+                )
+            else:
+                self._s3_off_reason = "boto3 missing"
 
         if self.ws_port:
-            self.ws_sink = WebSocketSink(port=self.ws_port)
+            try:
+                import websockets  # noqa: F401
+                self._ws_off_reason = ""
+                self.ws_sink = WebSocketSink(port=self.ws_port)
+            except ImportError:
+                self._ws_off_reason = "websockets missing"
+                print('[PREFLIGHT] ws OFF: websockets install nahi (pip install "websockets>=12")')
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -94,30 +113,41 @@ class EventBus:
             self.run_id = run_id
 
         if self.postgres_sink:
-            self.postgres_sink.start()
-            if self.camera_id:
-                self.postgres_sink.register_camera(
-                    camera_id=self.camera_id,
-                    name=camera_name,
-                    location=camera_location,
-                    node_id=node_id,
-                )
-            if self.run_id:
-                self.postgres_sink.start_run(
-                    run_id=self.run_id,
-                    camera_id=self.camera_id,
-                    source=source,
-                )
+            if not self.postgres_sink.start():
+                self._pg_off_reason = self.postgres_sink.off_reason or "connect failed"
+                self.postgres_sink = None
+            else:
+                if self.camera_id:
+                    self.postgres_sink.register_camera(
+                        camera_id=self.camera_id,
+                        name=camera_name,
+                        location=camera_location,
+                        node_id=node_id,
+                    )
+                if self.run_id:
+                    self.postgres_sink.start_run(
+                        run_id=self.run_id,
+                        camera_id=self.camera_id,
+                        source=source,
+                    )
 
         if self.s3_sink:
             if self.camera_id:
                 self.s3_sink.camera_id = self.camera_id
             if self.run_id:
                 self.s3_sink.run_id = self.run_id
-            self.s3_sink.start()
+            if not self.s3_sink.start():
+                self._s3_off_reason = self.s3_sink.off_reason or "connect failed"
+                if self._s3_off_reason == "boto3 missing":
+                    self.s3_sink = None
 
         if self.ws_sink:
-            self.ws_sink.start()
+            try:
+                self.ws_sink.start()
+            except Exception as e:
+                self._ws_off_reason = "start failed"
+                print(f"[WS SINK] Failed to start: {e}")
+                self.ws_sink = None
 
     def finish_run(
         self,
@@ -463,10 +493,13 @@ class EventBus:
         return report
 
     def get_status_str(self) -> str:
-        """Returns console status string for active sinks."""
-        pg_status = "ON" if self.postgres_sink is not None else "OFF"
-        s3_status = "ON" if (self.s3_sink is not None and self.s3_sink._client is not None) else "OFF"
-        ws_status = "ON" if self.ws_sink is not None else "OFF"
+        """Returns console status string for active sinks, including reasons when OFF."""
+        pg_status = "ON" if self.postgres_sink is not None else f"OFF({self._pg_off_reason})"
+        if self.s3_sink is not None and self.s3_sink._client is not None:
+            s3_status = "ON"
+        else:
+            s3_status = f"OFF({self._s3_off_reason})"
+        ws_status = "ON" if self.ws_sink is not None else f"OFF({self._ws_off_reason})"
         return f"[SINKS] json=ON postgres={pg_status} s3={s3_status} ws={ws_status}"
 
     def stop(self, timeout: float = 30.0) -> None:

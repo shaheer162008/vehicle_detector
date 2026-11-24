@@ -13,6 +13,18 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Callable, Tuple, List
 
 
+def check_psycopg_available(announce: bool = True) -> bool:
+    """Checks psycopg + libpq availability without opening a DB connection or retrying."""
+    try:
+        import psycopg
+        psycopg.pq.version()
+        return True
+    except Exception:
+        if announce:
+            print('[PREFLIGHT] postgres OFF: psycopg[binary] install nahi (pip install "psycopg[binary]>=3.1")')
+        return False
+
+
 def mask_database_url(url: str) -> str:
     """Masks credentials in postgresql URL for safe logging."""
     if not url:
@@ -61,6 +73,8 @@ class PostgresSink:
         self._conn_lock = threading.Lock()
         self.inserted_count: int = 0
         self.failed_count: int = 0
+        self.init_failed: bool = False
+        self.off_reason: str = ""
         self.on_insert_success = on_insert_success
         self.on_insert_failure = on_insert_failure
         self._run_id: Optional[str] = None
@@ -70,23 +84,36 @@ class PostgresSink:
     # Public lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
+    def start(self) -> bool:
         """Initializes schema and starts background ingestion worker."""
         if not self.database_url:
-            return
+            self.off_reason = "not configured"
+            return False
+
+        if not check_psycopg_available(announce=True):
+            self.init_failed = True
+            self.off_reason = "psycopg missing"
+            return False
 
         masked = mask_database_url(self.database_url)
         print(f"[POSTGRES] Connecting to Neon: {masked}")
 
-        self._apply_schema()
+        if not self._apply_schema():
+            self.init_failed = True
+            if not self.off_reason:
+                self.off_reason = "connect failed"
+            return False
 
         self.running = True
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
+        return True
 
     def register_camera(self, camera_id: str, name: str = "", location: str = "", node_id: str = "") -> None:
         """Inserts camera row on startup (ON CONFLICT DO NOTHING)."""
         self._camera_id = camera_id
+        if self.init_failed:
+            return
         with self._conn_lock:
             if not self._ensure_connection():
                 return
@@ -103,6 +130,8 @@ class PostgresSink:
     def start_run(self, run_id: str, camera_id: str, source: str = "") -> None:
         """Inserts a runs row with status='running'."""
         self._run_id = run_id
+        if self.init_failed:
+            return
         with self._conn_lock:
             if not self._ensure_connection():
                 return
@@ -118,7 +147,7 @@ class PostgresSink:
 
     def ensure_run_exists(self, run_id: str, camera_id: str = "") -> None:
         """Ensures a runs parent row exists before replaying historical events."""
-        if not run_id:
+        if not run_id or self.init_failed:
             return
         with self._conn_lock:
             if not self._ensure_connection():
@@ -143,6 +172,8 @@ class PostgresSink:
         status: str = "done",
     ) -> None:
         """Updates runs row on completion or crash."""
+        if self.init_failed:
+            return
         with self._conn_lock:
             if not self._ensure_connection():
                 return
@@ -231,35 +262,46 @@ class PostgresSink:
     # Schema & connection management
     # ------------------------------------------------------------------
 
-    def _apply_schema(self) -> None:
-        """Executes sql/schema.sql on startup with retry for Neon serverless cold starts."""
+    def _apply_schema(self) -> bool:
+        """Executes sql/schema.sql on startup. Never retries on ImportError."""
         if not self.schema_path.exists():
             print(f"[POSTGRES] Schema file not found: {self.schema_path}")
-            return
+            return False
+
+        if not check_psycopg_available(announce=True):
+            self.off_reason = "psycopg missing"
+            return False
+
+        import psycopg
 
         with open(self.schema_path, "r", encoding="utf-8") as f:
             schema_sql = f.read()
 
-        backoffs = [1, 2, 4]
+        backoffs = [1, 2]
         last_err = None
-        for attempt in range(len(backoffs)):
+        for delay in backoffs:
             try:
-                import psycopg
-
                 with psycopg.connect(self.database_url, connect_timeout=10, autocommit=True) as conn:
                     with conn.cursor() as cur:
                         cur.execute(schema_sql)
                 print("[POSTGRES] Schema successfully applied (cameras, runs, events).")
-                return
+                return True
+            except ImportError:
+                self.off_reason = "psycopg missing"
+                return False
             except Exception as e:
                 last_err = e
-                print(f"[POSTGRES] Schema attempt {attempt + 1}/{len(backoffs)} failed: {e}")
-                time.sleep(backoffs[attempt])
+                time.sleep(delay)
 
-        print(f"[POSTGRES ERROR] Failed to apply schema after retries: {last_err}")
+        self.off_reason = "connect failed"
+        print(f"[POSTGRES ERROR] Failed to connect/apply schema: {last_err}")
+        return False
 
     def _ensure_connection(self) -> bool:
-        """Verifies or reconnects to Neon Postgres with backoff. Must be called under _conn_lock."""
+        """Verifies or reconnects to Neon Postgres. Never retries on ImportError."""
+        if self.init_failed:
+            return False
+
         if self._conn is not None:
             try:
                 with self._conn.cursor() as cur:
@@ -272,17 +314,28 @@ class PostgresSink:
                     pass
                 self._conn = None
 
-        retries = 3
-        backoffs = [1, 2, 4]
-        for attempt in range(retries):
-            try:
-                import psycopg
+        if not check_psycopg_available(announce=True):
+            self.init_failed = True
+            self.off_reason = "psycopg missing"
+            return False
 
+        import psycopg
+
+        backoffs = [1, 2]
+        last_err = None
+        for delay in backoffs:
+            try:
                 self._conn = psycopg.connect(self.database_url, connect_timeout=10, autocommit=True)
                 return True
+            except ImportError:
+                self.init_failed = True
+                self.off_reason = "psycopg missing"
+                return False
             except Exception as e:
-                print(f"[POSTGRES] Connection attempt {attempt + 1}/{retries} failed: {e}")
-                time.sleep(backoffs[attempt])
+                last_err = e
+                time.sleep(delay)
+
+        print(f"[POSTGRES ERROR] Connection failed: {last_err}")
         return False
 
     # ------------------------------------------------------------------
