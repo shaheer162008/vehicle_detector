@@ -11,13 +11,16 @@ opencv-python-headless>=4.9.0.80
 # Vehicle Detector & Tracker
 # NOTE: Ultralytics is licensed under GNU AGPL-3.0.
 ultralytics>=8.3.0
+lap>=0.5.12
 
 # Numerical, Image, and Config utilities
 numpy>=1.24.0
 PyYAML>=6.0.1
 Pillow>=10.0.0
 
-# Database & Streaming Event Sinks
+# Database, Object Storage (S3), Drive & Streaming Event Sinks
 psycopg[binary]>=3.1
 websockets>=12
 python-dotenv
+boto3>=1.34.0
+gdown>=5.1.0

@@ -40,6 +40,11 @@ print(f"[TORCH CUDA] Device 0: {device_name} (Compute Capability: {cap_major}.{c
 # 2. ONNX Runtime Provider check
 try:
     import onnxruntime as ort
+    if hasattr(ort, "preload_dlls"):
+        try:
+            ort.preload_dlls()
+        except Exception:
+            pass
 except ImportError:
     print("[ERROR] onnxruntime is not installed.")
     sys.exit(1)

@@ -163,6 +163,19 @@ def parse_args():
         help="Disable WebSocket event sink.",
     )
     parser.add_argument(
+        "--s3-bucket",
+        type=str,
+        default=os.environ.get("S3_BUCKET", "alpr-snapshots"),
+        help="Neon S3 bucket name for snapshots & events (defaults to S3_BUCKET env var or 'alpr-snapshots').",
+    )
+    parser.add_argument(
+        "--no-s3",
+        dest="enable_s3",
+        action="store_false",
+        default=True,
+        help="Disable Neon S3 Object Storage sink.",
+    )
+    parser.add_argument(
         "--no-plate-boxes",
         dest="draw_plate_boxes",
         action="store_false",
@@ -257,6 +270,12 @@ def parse_args():
 
 
 def main():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
+
     args = parse_args()
 
     # 0. Output directory management
@@ -300,9 +319,15 @@ def main():
         hud_box_smoothing_factor=args.hud_smoothing,
         debug_reads=args.debug_reads,
         debug_outputs=args.debug_outputs,
-        database_url=args.database_url,
+        database_url=args.database_url or os.environ.get("DATABASE_URL"),
         ws_port=args.ws_port,
         enable_ws=args.enable_ws,
+        s3_endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
+        s3_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        s3_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        s3_region=os.environ.get("AWS_REGION", "us-east-2"),
+        s3_bucket=args.s3_bucket or os.environ.get("S3_BUCKET", "alpr-snapshots"),
+        enable_s3=args.enable_s3,
         draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,
     )

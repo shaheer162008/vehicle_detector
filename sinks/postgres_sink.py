@@ -31,6 +31,8 @@ class PostgresSink:
         self.running = False
         self.worker_thread: Optional[threading.Thread] = None
         self._conn = None
+        self.inserted_count: int = 0
+        self.failed_count: int = 0
 
     def start(self) -> None:
         """Initializes schema and starts background ingestion worker."""
@@ -48,23 +50,31 @@ class PostgresSink:
         self.worker_thread.start()
 
     def _apply_schema(self) -> None:
-        """Executes sql/schema.sql on startup."""
+        """Executes sql/schema.sql on startup with retry for Neon serverless cold starts."""
         if not self.schema_path.exists():
             print(f"[POSTGRES] Schema file not found: {self.schema_path}")
             return
 
-        try:
-            import psycopg
+        with open(self.schema_path, "r", encoding="utf-8") as f:
+            schema_sql = f.read()
 
-            with open(self.schema_path, "r", encoding="utf-8") as f:
-                schema_sql = f.read()
+        backoffs = [1, 2, 4]
+        last_err = None
+        for attempt in range(len(backoffs)):
+            try:
+                import psycopg
 
-            with psycopg.connect(self.database_url, connect_timeout=10, autocommit=True) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(schema_sql)
-            print("[POSTGRES] Schema successfully applied (CREATE TABLE IF NOT EXISTS events).")
-        except Exception as e:
-            print(f"[POSTGRES ERROR] Failed to apply schema: {e}")
+                with psycopg.connect(self.database_url, connect_timeout=10, autocommit=True) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(schema_sql)
+                print("[POSTGRES] Schema successfully applied (CREATE TABLE IF NOT EXISTS events).")
+                return
+            except Exception as e:
+                last_err = e
+                print(f"[POSTGRES] Schema attempt {attempt + 1}/{len(backoffs)} failed: {e}")
+                time.sleep(backoffs[attempt])
+
+        print(f"[POSTGRES ERROR] Failed to apply schema after retries: {last_err}")
 
     def _ensure_connection(self) -> bool:
         """Verifies or reconnects to Neon Postgres with exponential backoff (1s, 2s, 4s)."""
@@ -131,30 +141,43 @@ class PostgresSink:
             try:
                 if not self._ensure_connection():
                     print(f"[POSTGRES ERROR] Cannot insert event {event.get('event_id')}: DB unreachable.")
-                    self.queue.task_done()
+                    self.failed_count += 1
                     continue
 
                 # Prepare ISO timestamp from event date and time
                 event_date = event.get("date")
                 event_time = event.get("time")
                 dt_iso = f"{event_date}T{event_time}" if (event_date and event_time) else "now()"
+                params = (
+                    event.get("event_id"),
+                    event.get("camera_id"),
+                    dt_iso,
+                    event_date,
+                    event.get("snapshot_vehicle"),
+                    event.get("snapshot_number_plate"),
+                    event.get("plate_detection_confidence"),
+                    event.get("number_plate"),
+                    event.get("number_plate_confidence"),
+                )
 
-                with self._conn.cursor() as cur:
-                    cur.execute(
-                        insert_sql,
-                        (
-                            event.get("event_id"),
-                            event.get("camera_id"),
-                            dt_iso,
-                            event_date,
-                            event.get("snapshot_vehicle"),
-                            event.get("snapshot_number_plate"),
-                            event.get("plate_detection_confidence"),
-                            event.get("number_plate"),
-                            event.get("number_plate_confidence"),
-                        ),
-                    )
+                try:
+                    with self._conn.cursor() as cur:
+                        cur.execute(insert_sql, params)
+                    self.inserted_count += 1
+                except Exception:
+                    # Neon idle/SSL disconnect mid-query: force reconnect and retry once
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+                    if not self._ensure_connection():
+                        raise
+                    with self._conn.cursor() as cur:
+                        cur.execute(insert_sql, params)
+                    self.inserted_count += 1
             except Exception as e:
+                self.failed_count += 1
                 print(f"[POSTGRES ERROR] Failed to insert event {event.get('event_id')}: {e}")
             finally:
                 self.queue.task_done()
@@ -179,3 +202,4 @@ class PostgresSink:
 
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=timeout)
+        print(f"[POSTGRES] Saved {self.inserted_count} event(s) to Neon PostgreSQL (failed={self.failed_count}).")

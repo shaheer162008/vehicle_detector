@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass
 
@@ -118,11 +118,17 @@ class PipelineConfig:
     stage2_queue_maxsize: int = 1000
 
     # -------------------------------------------------------------
-    # Event Sinks (Postgres Neon & WebSocket)
+    # Event Sinks (Postgres Neon, Neon S3 Object Storage & WebSocket)
     # -------------------------------------------------------------
     database_url: Optional[str] = field(default_factory=lambda: os.environ.get("DATABASE_URL"))
     ws_port: Optional[int] = field(default_factory=lambda: int(os.environ.get("WS_PORT", "8765")) if os.environ.get("WS_PORT") else 8765)
     enable_ws: bool = True
+    s3_endpoint_url: Optional[str] = field(default_factory=lambda: os.environ.get("AWS_ENDPOINT_URL_S3"))
+    s3_access_key_id: Optional[str] = field(default_factory=lambda: os.environ.get("AWS_ACCESS_KEY_ID"))
+    s3_secret_access_key: Optional[str] = field(default_factory=lambda: os.environ.get("AWS_SECRET_ACCESS_KEY"))
+    s3_region: str = field(default_factory=lambda: os.environ.get("AWS_REGION", "us-east-2"))
+    s3_bucket: str = field(default_factory=lambda: os.environ.get("S3_BUCKET", "alpr-snapshots"))
+    enable_s3: bool = True
 
     # -------------------------------------------------------------
     # Real-Time Colab Preview & Performance

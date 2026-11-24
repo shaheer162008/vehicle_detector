@@ -9,6 +9,7 @@ Features:
 6. Non-blocking Colab Live Preview via IPython.display.
 """
 
+import json
 import os
 import queue
 import shutil
@@ -27,27 +28,60 @@ REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from config import PipelineConfig
-from fast_alpr import ALPR
-from tracker import VehicleTrackerManager, filter_nested_boxes, levenshtein_distance
-
 
 def register_nvidia_dll_paths() -> None:
-    """Register NVIDIA runtime DLL directories before loading ONNX Runtime."""
-    site_packages = Path(sys.base_prefix) / "Lib" / "site-packages"
+    """Register NVIDIA runtime DLL/shared-lib directories before loading ONNX Runtime."""
     try:
         import site
 
-        for candidate in site.getsitepackages():
+        candidates = list(site.getsitepackages())
+        user_site = site.getusersitepackages()
+        if user_site:
+            candidates.append(user_site)
+
+        for candidate in candidates:
             nvidia_root = Path(candidate) / "nvidia"
-            if nvidia_root.is_dir():
-                for dll_dir in nvidia_root.rglob("bin"):
-                    path = str(dll_dir)
+            if not nvidia_root.is_dir():
+                continue
+            for sub in ("bin", "lib"):
+                for lib_dir in nvidia_root.rglob(sub):
+                    path = str(lib_dir)
                     if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                        os.add_dll_directory(path)
-                    os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+                        try:
+                            os.add_dll_directory(path)
+                        except Exception:
+                            pass
+                    if path not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+                    if os.name != "nt" and path not in os.environ.get("LD_LIBRARY_PATH", ""):
+                        os.environ["LD_LIBRARY_PATH"] = path + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
     except Exception:
         pass
+
+
+def _in_ipython_notebook() -> bool:
+    """Returns True when running inside a Jupyter / Google Colab notebook kernel."""
+    try:
+        from IPython import get_ipython
+
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ != "TerminalInteractiveShell"
+    except Exception:
+        return False
+
+
+def _has_gui_display() -> bool:
+    """Returns True if an OS GUI display is available for OpenCV imshow."""
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+register_nvidia_dll_paths()
+
+from config import PipelineConfig
+from fast_alpr import ALPR
+from tracker import VehicleTrackerManager, filter_nested_boxes, levenshtein_distance
 
 
 class ColabLivePreviewWorker:
@@ -112,7 +146,7 @@ class ColabLivePreviewWorker:
 
                 ret, buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
                 if ret and self.display_handle is not None:
-                    self.display_handle.update(Image(data=buf.tobytes()))
+                    self.display_handle.update(Image(data=buf.tobytes(), format="jpg"))
             except Exception:
                 pass
 
@@ -129,6 +163,7 @@ class DesktopPreviewWorker:
         self.max_w = max_w
         self.max_h = max_h
         self.running = False
+        self.user_closed = False
         self.window_name = "FastALPR Realtime Preview"
 
     def start(self) -> None:
@@ -154,6 +189,7 @@ class DesktopPreviewWorker:
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q"), ord("Q")):
                 self.running = False
+                self.user_closed = True
         except Exception:
             self.running = False
 
@@ -191,6 +227,15 @@ class VehicleALPRPipeline:
             database_url=getattr(self.config, "database_url", None),
             ws_port=getattr(self.config, "ws_port", 8765),
             enable_ws=getattr(self.config, "enable_ws", True),
+            s3_endpoint_url=getattr(self.config, "s3_endpoint_url", None),
+            s3_access_key_id=getattr(self.config, "s3_access_key_id", None),
+            s3_secret_access_key=getattr(self.config, "s3_secret_access_key", None),
+            s3_region=getattr(self.config, "s3_region", "us-east-2"),
+            s3_bucket=getattr(self.config, "s3_bucket", "alpr-snapshots"),
+            enable_s3=getattr(self.config, "enable_s3", True),
+            snapshots_dir=self.config.snapshots_dir,
+            events_json_path=self.config.events_json_path,
+            events_jsonl_path=self.config.events_jsonl_path,
         )
         self.tracker_manager = VehicleTrackerManager(self.config, event_bus=self.event_bus)
         self.preview_worker: Optional[ColabLivePreviewWorker | DesktopPreviewWorker] = None
@@ -259,6 +304,11 @@ class VehicleALPRPipeline:
         try:
             register_nvidia_dll_paths()
             import onnxruntime as ort
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception:
+                    pass
 
             available_providers = ort.get_available_providers()
             print(f"[ONNX RUNTIME] Available Providers: {available_providers}")
@@ -384,11 +434,25 @@ class VehicleALPRPipeline:
             print(f"[OUTPUT] Writing video at {fps:.1f} FPS to: {raw_output_path.resolve()}")
 
         if self.config.show_preview:
-            self.preview_worker = DesktopPreviewWorker(
-                max_w=self.config.preview_max_width,
-                max_h=self.config.preview_max_height,
-            )
-            self.preview_worker.start()
+            if _in_ipython_notebook():
+                self.preview_worker = ColabLivePreviewWorker(
+                    max_w=self.config.preview_max_width,
+                    max_h=self.config.preview_max_height,
+                    jpeg_quality=self.config.preview_jpeg_quality,
+                )
+                self.preview_worker.start()
+                if not getattr(self.preview_worker, "running", False):
+                    self.preview_worker = None
+            elif _has_gui_display():
+                self.preview_worker = DesktopPreviewWorker(
+                    max_w=self.config.preview_max_width,
+                    max_h=self.config.preview_max_height,
+                )
+                self.preview_worker.start()
+                if not getattr(self.preview_worker, "running", False):
+                    self.preview_worker = None
+            else:
+                print("[PREVIEW] Headless environment (no $DISPLAY / non-notebook). Continuing without GUI preview.")
 
         frame_idx = 0
         rolling_fps = fps
@@ -729,7 +793,7 @@ class VehicleALPRPipeline:
                 if self.preview_worker is not None and annotated_frame is not None:
                     if frame_idx % self.config.preview_interval == 0:
                         self.preview_worker.update_frame(annotated_frame)
-                        if not getattr(self.preview_worker, "running", True):
+                        if getattr(self.preview_worker, "user_closed", False):
                             print("[INFO] Preview window closed. Stopping pipeline.")
                             break
                 prof_preview += time.perf_counter() - t_prev_start
@@ -837,6 +901,9 @@ class VehicleALPRPipeline:
                 if not ffmpeg_bin:
                     print("[FFMPEG NOTE] ffmpeg not installed. Video saved as standard mp4v container.")
                 raw_output_path.rename(final_out)
+
+            if final_out.exists():
+                self.event_bus.upload_artifact(final_out, final_out.name)
 
             if self.config.drive_output_dir.exists():
                 try:

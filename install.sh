@@ -9,25 +9,34 @@ cd "$(dirname "$0")"
 
 echo "=== FastALPR + Vehicle Tracking Fast Installer ==="
 
-# 1. Select Python version (Prefer 3.11 or 3.12, fallback to 3.13 or system python3)
+# 1. Select Python version (Colab/Kaggle uses active python3; local Linux prefers 3.12/3.11)
 PY_CMD=""
-for cmd in python3.12 python3.11 python3.13 python3 python; do
-    if command -v "$cmd" &> /dev/null; then
-        PY_CMD="$cmd"
-        break
-    fi
-done
+if [ -n "$COLAB_RELEASE_TAG" ] || [ -n "$COLAB_GPU" ] || [ -d "/content" ] || [ -n "$KAGGLE_CONTAINER_NAME" ]; then
+    for cmd in python3 python; do
+        if command -v "$cmd" &> /dev/null; then
+            PY_CMD="$cmd"
+            break
+        fi
+    done
+else
+    for cmd in python3.12 python3.11 python3.13 python3 python; do
+        if command -v "$cmd" &> /dev/null; then
+            PY_CMD="$cmd"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PY_CMD" ]; then
     echo "[ERROR] No Python found. Please install Python 3.11 or 3.12."
     exit 1
 fi
 
-echo "[INFO] Using Python: $($PY_CMD --version)"
+echo "[INFO] Using Python: $($PY_CMD --version) ($(command -v "$PY_CMD"))"
 
-# Create virtual environment if not in container/Colab where venv isn't needed
+# Create virtual environment only on local machines (not inside Colab/Kaggle containers)
 VENV_PY="$PY_CMD"
-if [ -z "$COLAB_GPU" ] && [ -z "$KAGGLE_CONTAINER_NAME" ]; then
+if [ -z "$COLAB_RELEASE_TAG" ] && [ -z "$COLAB_GPU" ] && [ ! -d "/content" ] && [ -z "$KAGGLE_CONTAINER_NAME" ]; then
     if [ -d ".venv" ]; then
         rm -rf .venv
     fi
@@ -43,9 +52,13 @@ $VENV_PY -m pip install --upgrade pip --no-input
 echo "[2/4] Installing requirements.txt with pre-built binary wheels..."
 $VENV_PY -m pip install -r requirements.txt --no-input --prefer-binary
 
-echo "[3/4] Ensuring clean GPU builds (uninstalling CPU onnxruntime, installing cu128 torch + onnxruntime-gpu)..."
+echo "[3/4] Ensuring clean GPU builds (uninstalling CPU onnxruntime, ensuring CUDA torch + onnxruntime-gpu)..."
 $VENV_PY -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
-$VENV_PY -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128 --no-input
+if $VENV_PY -c "import torch, torchvision; assert torch.cuda.is_available()" 2>/dev/null; then
+    echo "[INFO] CUDA PyTorch already active, skipping 2.5GB re-download."
+else
+    $VENV_PY -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128 --no-input
+fi
 $VENV_PY -m pip install "onnxruntime-gpu[cuda,cudnn]==1.22.0" --no-input
 
 echo "[4/4] Verifying GPU acceleration with check_gpu.py..."
