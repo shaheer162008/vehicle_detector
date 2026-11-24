@@ -16,3 +16,8 @@ ultralytics>=8.3.0
 numpy>=1.24.0
 PyYAML>=6.0.1
 Pillow>=10.0.0
+
+# Database & Streaming Event Sinks
+psycopg[binary]>=3.1
+websockets>=12
+python-dotenv

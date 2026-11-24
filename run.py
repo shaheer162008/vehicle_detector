@@ -145,6 +145,24 @@ def parse_args():
         help="Save extra debug outputs (context images, plate crops, plate reads). Default False.",
     )
     parser.add_argument(
+        "--database-url",
+        default=os.environ.get("DATABASE_URL"),
+        help="PostgreSQL connection URL for Neon event sink (defaults to DATABASE_URL env var).",
+    )
+    parser.add_argument(
+        "--ws-port",
+        type=int,
+        default=int(os.environ.get("WS_PORT", "8765")) if os.environ.get("WS_PORT") else 8765,
+        help="Port for WebSocket event sink (defaults to WS_PORT env var or 8765).",
+    )
+    parser.add_argument(
+        "--no-ws",
+        dest="enable_ws",
+        action="store_false",
+        default=True,
+        help="Disable WebSocket event sink.",
+    )
+    parser.add_argument(
         "--no-plate-boxes",
         dest="draw_plate_boxes",
         action="store_false",
@@ -289,6 +307,9 @@ def main():
         hud_box_smoothing_factor=args.hud_smoothing,
         debug_reads=args.debug_reads,
         debug_outputs=args.debug_outputs,
+        database_url=args.database_url,
+        ws_port=args.ws_port,
+        enable_ws=args.enable_ws,
         draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,
     )

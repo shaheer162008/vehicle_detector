@@ -175,7 +175,14 @@ class VehicleALPRPipeline:
 
         self.vehicle_model = None
         self.alpr = None
-        self.tracker_manager = VehicleTrackerManager(self.config)
+
+        from sinks import EventBus
+        self.event_bus = EventBus(
+            database_url=getattr(self.config, "database_url", None),
+            ws_port=getattr(self.config, "ws_port", 8765),
+            enable_ws=getattr(self.config, "enable_ws", True),
+        )
+        self.tracker_manager = VehicleTrackerManager(self.config, event_bus=self.event_bus)
         self.preview_worker: Optional[ColabLivePreviewWorker | DesktopPreviewWorker] = None
         self.has_cuda = False
         self._printed_char_conf_proof: bool = False
@@ -323,6 +330,7 @@ class VehicleALPRPipeline:
         exact duration matching, and clean console logging.
         """
         self.initialize_models()
+        self.event_bus.start()
 
         src_str = str(video_source)
         if isinstance(video_source, int) or src_str.isdigit():
@@ -769,6 +777,10 @@ class VehicleALPRPipeline:
                             f_item.unlink()
                         except Exception:
                             pass
+
+            # Flush external sinks (Neon PostgreSQL + WebSocket)
+            self.event_bus.stop(timeout=10.0)
+            print(self.event_bus.get_status_str())
 
         pipeline_wall_total = time.perf_counter() - pipeline_wall_start
 

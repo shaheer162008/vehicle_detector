@@ -550,8 +550,9 @@ class TrackState:
 
 
 class VehicleTrackerManager:
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, event_bus: Optional[Any] = None):
         self.config = config
+        self.event_bus = event_bus
         self.tracks: Dict[int, TrackState] = {}
         self.emitted_events: List[dict] = []
         self.emitted_events_meta: List[dict] = []
@@ -1632,6 +1633,13 @@ class VehicleTrackerManager:
         with open(temp_json, "w", encoding="utf-8") as f_json:
             json.dump(self.emitted_events, f_json, indent=2)
         os.replace(temp_json, self.config.events_json_path)
+
+        # Publish to external sinks (Neon PostgreSQL + WebSocket) via EventBus
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish(event_data)
+            except Exception as e:
+                print(f"[EVENT BUS] Publish error: {e}")
 
         # Console print only if explicitly requested
         if self.config.print_events_to_terminal:

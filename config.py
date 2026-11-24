@@ -5,9 +5,16 @@ Supports Pakistani, General, and UK plate formats, multi-camera JSON setups, and
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 @dataclass
@@ -109,6 +116,13 @@ class PipelineConfig:
     # -------------------------------------------------------------
     enable_stage2_interface: bool = True
     stage2_queue_maxsize: int = 1000
+
+    # -------------------------------------------------------------
+    # Event Sinks (Postgres Neon & WebSocket)
+    # -------------------------------------------------------------
+    database_url: Optional[str] = field(default_factory=lambda: os.environ.get("DATABASE_URL"))
+    ws_port: Optional[int] = field(default_factory=lambda: int(os.environ.get("WS_PORT", "8765")) if os.environ.get("WS_PORT") else 8765)
+    enable_ws: bool = True
 
     # -------------------------------------------------------------
     # Real-Time Colab Preview & Performance

@@ -103,6 +103,13 @@ Every emitted event produces a clean vehicle snapshot, a license plate crop (if 
   install.bat
   ```
 
+### Database Configuration (Neon PostgreSQL in Colab)
+To enable Neon PostgreSQL event streaming in Google Colab, set `DATABASE_URL` via Colab Secrets or `os.environ`:
+```python
+import os
+os.environ["DATABASE_URL"] = "postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+```
+
 ### Example Commands
 
 ```bash
