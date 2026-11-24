@@ -30,34 +30,37 @@ class WebSocketSink:
         print(f"[WS SINK] WebSocket server listening on ws://{self.host}:{self.port}")
 
     def _run_loop(self) -> None:
+        """Runs the WebSocket server inside a proper running event loop (works on websockets 10-17)."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         try:
-            import websockets
-
-            async def _handler(ws):
-                self.clients.add(ws)
-                try:
-                    # Send last 20 events upon new client connection
-                    for ev in list(self.recent_events):
-                        await ws.send(json.dumps(ev))
-                    async for _ in ws:
-                        pass
-                except Exception:
-                    pass
-                finally:
-                    self.clients.discard(ws)
-
-            start_server = websockets.serve(_handler, self.host, self.port)
-            self.server = self.loop.run_until_complete(start_server)
-            self.loop.run_forever()
+            self.loop.run_until_complete(self._serve())
         except Exception as e:
             print(f"[WS SINK] Server error: {e}")
         finally:
-            if self.server:
-                self.server.close()
-                self.loop.run_until_complete(self.server.wait_closed())
-            self.loop.close()
+            try:
+                self.loop.close()
+            except Exception:
+                pass
+
+    async def _serve(self) -> None:
+        import websockets
+
+        async def _handler(ws):
+            self.clients.add(ws)
+            try:
+                for ev in list(self.recent_events):
+                    await ws.send(json.dumps(ev))
+                async for _ in ws:
+                    pass
+            except Exception:
+                pass
+            finally:
+                self.clients.discard(ws)
+
+        self._stop_event = asyncio.Event()
+        async with websockets.serve(_handler, self.host, self.port):
+            await self._stop_event.wait()
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Broadcasts event JSON to all connected clients."""
@@ -81,5 +84,5 @@ class WebSocketSink:
     def stop(self, timeout: float = 2.0) -> None:
         """Closes the WebSocket server cleanly."""
         self.running = False
-        if self.loop is not None and self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.loop is not None and self.loop.is_running() and getattr(self, "_stop_event", None) is not None:
+            self.loop.call_soon_threadsafe(self._stop_event.set)
