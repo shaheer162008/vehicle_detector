@@ -48,6 +48,13 @@ python tools/check_s3.py
 python tools/check_db.py
 ```
 
+## Neon setup
+1. Run `sql/schema.sql` once in Neon SQL Editor (auto-applied at startup too).
+2. Copy `.env.example` to `.env` and fill `DATABASE_URL`, `AWS_*`, `S3_BUCKET` (plus `AI_GATEWAY_*` for Stage 2).
+3. Run the pipeline: `python run.py --source stream_2.mp4 --plate-format GENERAL`.
+4. Verify DB + S3 sync: `python tools/verify_neon.py`.
+5. Optional Stage 2 AI analysis: `python tools/stage2_worker.py`.
+
 ## License
 
 Built on [FastALPR](https://github.com/ankandrew/fast-alpr) (MIT). Vehicle detection uses Ultralytics YOLO (AGPL-3.0).
