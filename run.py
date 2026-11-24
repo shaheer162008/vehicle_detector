@@ -263,17 +263,10 @@ def main():
     output_dir = Path("output")
     if not args.keep_output and output_dir.exists():
         try:
-            has_files = any(output_dir.iterdir())
-        except Exception:
-            has_files = False
-        if has_files:
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_dir = Path(f"output_prev_{timestamp_str}")
-            try:
-                shutil.move(str(output_dir), str(archive_dir))
-                print(f"[OUTPUT] Existing 'output/' directory archived to '{archive_dir}'")
-            except Exception as e:
-                print(f"[OUTPUT WARNING] Could not archive output/ to {archive_dir}: {e}")
+            shutil.rmtree(str(output_dir), ignore_errors=True)
+            print("[OUTPUT] Purana 'output/' directory clean kar diya gaya.")
+        except Exception as e:
+            print(f"[OUTPUT WARNING] Could not clean output/: {e}")
 
     roi_poly = None
     if args.roi:

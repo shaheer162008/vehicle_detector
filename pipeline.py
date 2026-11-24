@@ -132,9 +132,13 @@ class DesktopPreviewWorker:
         self.window_name = "FastALPR Realtime Preview"
 
     def start(self) -> None:
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, self.max_w, self.max_h)
-        self.running = True
+        try:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.window_name, self.max_w, self.max_h)
+            self.running = True
+        except Exception as e:
+            print(f"[PREVIEW] Display unavailable (headless/Colab): {e}. Running without preview.")
+            self.running = False
 
     def update_frame(self, frame: np.ndarray) -> None:
         if not self.running:
@@ -145,14 +149,20 @@ class DesktopPreviewWorker:
             preview = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
         else:
             preview = frame
-        cv2.imshow(self.window_name, preview)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q"), ord("Q")):
+        try:
+            cv2.imshow(self.window_name, preview)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q"), ord("Q")):
+                self.running = False
+        except Exception:
             self.running = False
 
     def stop(self) -> None:
         self.running = False
-        cv2.destroyWindow(self.window_name)
+        try:
+            cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
 
 
 class VehicleALPRPipeline:
