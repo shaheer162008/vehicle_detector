@@ -969,6 +969,13 @@ class VehicleALPRPipeline:
 
         print(f"Number of Event Pairs with box IoU > 0.5 within 2s: {overlapping_event_pairs}")
         print("-" * 75)
+        print(
+            f"[SUMMARY] tracks_seen={self.tracker_manager.total_tracks_seen} "
+            f"events_emitted={len(self.tracker_manager.emitted_events)} "
+            f"stitched={self.tracker_manager.total_tracks_stitched} "
+            f"dropped={self.tracker_manager.total_tracks_dropped}"
+        )
+        print("-" * 75)
         print("List of Number Plates:")
         if detected_plates_with_conf:
             for p_text, p_conf in detected_plates_with_conf:
