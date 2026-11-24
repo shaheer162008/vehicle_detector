@@ -376,6 +376,92 @@ class EventBus:
             except Exception as e:
                 print(f"[EVENT BUS] S3 artifact upload error: {e}")
 
+    def print_sync_report(
+        self,
+        events_json_path: Optional[Path] = None,
+        output_video_path: Optional[Path] = None,
+        run_id: str = "",
+    ) -> str:
+        """
+        Verifies end-of-run consistency between events.json, Neon Postgres (for run_id),
+        and Neon S3 (head_object per key), prints mismatch reasons, and returns summary line.
+        """
+        mismatches: List[str] = []
+        json_path = Path(events_json_path) if events_json_path else self.events_json_path
+        rid = run_id or self.run_id
+
+        events: List[Dict[str, Any]] = []
+        if json_path.exists():
+            try:
+                loaded = json.loads(json_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    events = loaded
+                else:
+                    mismatches.append("events_json_not_a_list")
+            except Exception as e:
+                mismatches.append(f"events_json_read_error: {e}")
+        json_count = len(events)
+
+        db_count = 0
+        if self.postgres_sink is not None:
+            db_rows_list = self.postgres_sink.get_run_events(rid)
+            if db_rows_list is None:
+                mismatches.append("postgres_unreachable")
+            else:
+                db_count = len(db_rows_list)
+                db_ids = {r["event_id"] for r in db_rows_list}
+                for ev in events:
+                    eid = ev.get("event_id")
+                    if eid not in db_ids:
+                        mismatches.append(f"db_missing_row:{eid}")
+                if db_count != json_count:
+                    mismatches.append(f"db_count_mismatch:json={json_count},db={db_count}")
+
+        s3_count = 0
+        if self.s3_sink is not None:
+            if self.s3_sink._client is None:
+                mismatches.append("s3_client_unavailable")
+            else:
+                for ev in events:
+                    vk = self.s3_sink.event_vehicle_key(ev)
+                    if self.s3_sink.head_object(vk):
+                        s3_count += 1
+                    else:
+                        mismatches.append(f"s3_missing:{vk}")
+
+                    pk = self.s3_sink.event_plate_key(ev)
+                    if pk:
+                        if self.s3_sink.head_object(pk):
+                            s3_count += 1
+                        else:
+                            mismatches.append(f"s3_missing:{pk}")
+
+                    mk = self.s3_sink.event_manifest_key(ev)
+                    if self.s3_sink.head_object(mk):
+                        s3_count += 1
+                    else:
+                        mismatches.append(f"s3_missing:{mk}")
+
+                if json_path.exists() and rid:
+                    rk = self.s3_sink.run_events_key()
+                    if self.s3_sink.head_object(rk):
+                        s3_count += 1
+                    else:
+                        mismatches.append(f"s3_missing:{rk}")
+
+                if output_video_path and Path(output_video_path).exists() and rid:
+                    vid_key = self.s3_sink.run_video_key()
+                    if self.s3_sink.head_object(vid_key):
+                        s3_count += 1
+                    else:
+                        mismatches.append(f"s3_missing:{vid_key}")
+
+        report = f"[SYNC] json_events={json_count} db_rows={db_count} s3_objects={s3_count} mismatches={mismatches}"
+        print(report)
+        for reason in mismatches:
+            print(f"[SYNC MISMATCH] {reason}")
+        return report
+
     def get_status_str(self) -> str:
         """Returns console status string for active sinks."""
         pg_status = "ON" if self.postgres_sink is not None else "OFF"

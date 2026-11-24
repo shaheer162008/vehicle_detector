@@ -631,6 +631,11 @@ class VehicleALPRPipeline:
                     events_emitted=len(self.tracker_manager.emitted_events),
                     status=run_status,
                 )
+                self.event_bus.print_sync_report(
+                    events_json_path=self.config.events_json_path,
+                    output_video_path=None,
+                    run_id=self.run_id,
+                )
                 print(self.event_bus.get_status_str())
                 self.event_bus.close_db()
 
@@ -644,6 +649,11 @@ class VehicleALPRPipeline:
             tracks_seen=self.tracker_manager.total_tracks_seen,
             events_emitted=len(self.tracker_manager.emitted_events),
             status=run_status,
+        )
+        self.event_bus.print_sync_report(
+            events_json_path=self.config.events_json_path,
+            output_video_path=(Path(output_video_path) if (output_video_path and self.config.save_video) else None),
+            run_id=self.run_id,
         )
         print(self.event_bus.get_status_str())
         self.event_bus.close_db()

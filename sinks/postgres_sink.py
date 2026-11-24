@@ -10,7 +10,7 @@ import queue
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, Tuple
+from typing import Optional, Dict, Any, Callable, Tuple, List
 
 
 def mask_database_url(url: str) -> str:
@@ -180,6 +180,27 @@ class PostgresSink:
         else:
             self.failed_count += 1
         return ok
+
+    def get_run_events(self, run_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Queries events table for all rows belonging to run_id."""
+        if not run_id:
+            return []
+        with self._conn_lock:
+            if not self._ensure_connection():
+                return None
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT event_id, vehicle_key, plate_key, s3_bucket FROM events WHERE run_id = %s;",
+                        (run_id,),
+                    )
+                    return [
+                        {"event_id": r[0], "vehicle_key": r[1], "plate_key": r[2], "s3_bucket": r[3]}
+                        for r in cur.fetchall()
+                    ]
+            except Exception as e:
+                print(f"[POSTGRES] Sync query error: {e}")
+                return None
 
     def stop(self, timeout: float = 10.0) -> None:
         """Flushes remaining queue items within timeout and cleanly shuts down."""
