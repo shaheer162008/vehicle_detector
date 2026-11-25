@@ -5,6 +5,7 @@ Loads environment variables from .env (with override=True) for Neon Postgres & N
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union, Dict
@@ -168,7 +169,9 @@ def load_camera_from_json(
     camera_id: str,
     base_config: Optional[PipelineConfig] = None,
 ) -> PipelineConfig:
-    """Loads optional per-camera settings from a user-provided JSON file."""
+    """Loads optional per-camera settings from a user-provided JSON file.
+    Supports env override: CAMERA_n_RTSP_URL, CAMERA_n_NAME, CAMERA_n_LOCATION (n=1..40).
+    If env RTSP_URL is empty, camera is considered 'not configured'."""
     cfg = base_config or PipelineConfig()
     path = Path(json_path)
     if not path.exists():
@@ -183,6 +186,13 @@ def load_camera_from_json(
             print(f"[CONFIG WARNING] Camera ID '{camera_id}' not found in {path}. Using defaults.")
             return cfg
 
+        # Extract camera number from ID (CAM-00001 -> 1)
+        cam_num = None
+        m = re.match(r"CAM-0*(\d+)", camera_id)
+        if m:
+            cam_num = int(m.group(1))
+
+        # Load from JSON first
         cfg.camera_id = matched.get("camera_id", camera_id)
         cfg.camera_name = matched.get("name", cfg.camera_name)
         cfg.camera_location = matched.get("location", cfg.camera_location)
@@ -193,6 +203,23 @@ def load_camera_from_json(
             cfg.min_readable_vehicle_area = float(matched["min_readable_vehicle_area"])
         if matched.get("roi_polygon"):
             cfg.roi_polygon = matched["roi_polygon"]
+
+        # Env overrides (CAMERA_n_RTSP_URL, CAMERA_n_NAME, CAMERA_n_LOCATION)
+        if cam_num and 1 <= cam_num <= 40:
+            env_rtsp = os.environ.get(f"CAMERA_{cam_num}_RTSP_URL")
+            env_name = os.environ.get(f"CAMERA_{cam_num}_NAME")
+            env_loc = os.environ.get(f"CAMERA_{cam_num}_LOCATION")
+            if env_rtsp is not None:
+                cfg.rtsp_url = env_rtsp if env_rtsp.strip() else ""
+            if env_name is not None:
+                cfg.camera_name = env_name
+            if env_loc is not None:
+                cfg.camera_location = env_loc
+
+        # Mark if not configured
+        if not cfg.rtsp_url:
+            print(f"[CONFIG] Camera {camera_id}: not configured (empty RTSP URL)")
+
         cfg.__post_init__()
         return cfg
     except Exception as e:

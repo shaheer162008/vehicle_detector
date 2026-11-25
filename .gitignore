@@ -229,6 +229,16 @@ output_prev_*/
 *.bak*
 frame_test.png
 
+# Windows path artifacts (collected from bad copy)
+D:*/
+*:/
+
+# Service runtime
+logs/
+.run/
+bin/
+output/
+
 # Secrets & local env
 .env
 .env.local

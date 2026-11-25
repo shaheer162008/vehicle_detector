@@ -148,31 +148,28 @@ class StreamManager:
         return candidate
 
     def _validate_file_source(self, file_path: str) -> Path:
-        """Validate and resolve file source path within VIDEO_DIR or project root."""
+        """Validate and resolve file source path within VIDEO_DIR only.
+        Allowed extensions: .mp4, .mkv, .avi"""
         path = Path(file_path)
         if path.is_absolute():
             raise ValueError("File source must be relative path")
 
-        # First try VIDEO_DIR
+        # Check extension
+        allowed_ext = {".mp4", ".mkv", ".avi"}
+        if path.suffix.lower() not in allowed_ext:
+            raise ValueError(f"File extension '{path.suffix}' not allowed. Allowed: {allowed_ext}")
+
+        # Must be within VIDEO_DIR
         resolved = (self.video_dir / path).resolve()
-        if resolved.exists():
-            try:
-                resolved.relative_to(self.video_dir)
-                return resolved
-            except ValueError:
-                pass
+        try:
+            resolved.relative_to(self.video_dir)
+        except ValueError:
+            raise ValueError(f"File must be within VIDEO_DIR: {self.video_dir}")
 
-        # Fallback to project root (for stream_live.mp4 etc.)
-        project_root = Path(__file__).resolve().parent.parent
-        resolved = (project_root / path).resolve()
-        if resolved.exists():
-            try:
-                resolved.relative_to(project_root)
-                return resolved
-            except ValueError:
-                pass
+        if not resolved.exists():
+            raise ValueError(f"File not found: {resolved}")
 
-        raise ValueError(f"File not found: {path} (checked VIDEO_DIR and project root)")
+        return resolved
 
     def _build_worker_args(self, config: StreamConfig, stream_id: str) -> List[str]:
         """Build command line arguments for worker subprocess."""
