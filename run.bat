@@ -1,159 +1,117 @@
 @echo off
 setlocal enabledelayedexpansion
+
 cd /d "%~dp0"
 
-rem .env is loaded by python-dotenv inside config.py / run.py.
-rem DO NOT parse .env here: Neon URLs contain special chars that break cmd.
+echo === FastALPR Runner ===
 
-set "OUTPUT_VIDEO=output\annotated_output.mp4"
-set "DRIVE_FILE_ID=1szprqeBN3eQ5vBcRJ8HVIowMu514F94L"
-set "VIDEO_DIR=videos"
+rem Check for .venv
+if not exist ".venv\Scripts\python.exe" (
+    echo [ERROR] .venv not found. Run setup.bat first.
+    exit /b 1
+)
 
-echo =================================================
-echo === FastALPR Vehicle Tracking Run Script ===
-echo =================================================
+set "VENV_PY=.venv\Scripts\python.exe"
 
-rem 1. Python environment detection
-set "PYTHON="
-if exist ".venv\Scripts\python.exe" (
-    set "PYTHON=.venv\Scripts\python.exe"
-) else (
-    where python >nul 2>nul
-    if %errorlevel% equ 0 (
-        set "PYTHON=python"
-    ) else (
-        echo [ERROR] Python not found. Run install.bat first.
+rem Run selftest first
+echo.
+echo Running self-test...
+%VENV_PY% tools/selftest.py
+if %errorlevel% neq 0 (
+    echo.
+    echo [WARN] Self-test had failures.
+    set /p "CONTINUE=Continue anyway? [Y/n]: "
+    if /i "%CONTINUE%" neq "Y" if /i "%CONTINUE%" neq "YES" (
+        echo Aborted.
         exit /b 1
     )
 )
 
-rem 2. Check GPU acceleration (fail early, never run silently on CPU)
-echo [CHECK] Verifying GPU hardware and execution providers...
-"%PYTHON%" tools\check_gpu.py
-if %errorlevel% neq 0 (
-    echo.
-    echo [ERROR] GPU check failed. Execution halted to prevent slow CPU execution.
-    exit /b 1
+echo.
+echo Choose mode:
+echo   [1] Detection -> Neon (CLI mode, python run.py)
+echo   [2] Service for Next.js frontend (uvicorn service.app:app)
+echo   [3] Self-test only
+echo.
+set /p "MODE=Select [1-3]: "
+
+if "%MODE%"=="3" (
+    echo Self-test already done. Exiting.
+    exit /b 0
 )
+
+if "%MODE%"=="2" (
+    rem Service mode
+    echo.
+    echo Starting FastAPI service for Next.js frontend...
+    echo.
+    echo Service will run on http://127.0.0.1:8000
+    echo API docs: http://127.0.0.1:8000/docs
+    echo WebSocket events: ws://127.0.0.1:8000/ws/events?token=***
+    echo WebSocket frames: ws://127.0.0.1:8000/ws/frames/{stream_id}?token=***
+    echo.
+    echo Press Ctrl+C to stop.
+    echo.
+    %VENV_PY% -m uvicorn service.app:app --host 127.0.0.1 --port 8000
+    exit /b 0
+)
+
+rem Mode 1: CLI detection
+echo.
+echo CLI Detection Mode
 echo.
 
-rem 3. Video Selection Menu or Argument Handling
-set "VIDEO_PATH="
-set "ARG1=%~1"
+rem Check camera 1 RTSP URL
+%VENV_PY% -c "
+import os
+from dotenv import load_dotenv
+load_dotenv('.env', override=True)
+rtsp = os.environ.get('CAMERA_1_RTSP_URL', '')
+if rtsp:
+    print('[INFO] CAMERA_1_RTSP_URL:', rtsp)
+    if rtsp.startswith('rtsp://127.0.0.1:8554'):
+        print('[HINT] This is a local stream. Make sure stream.bat is running!')
+else:
+    print('[WARN] CAMERA_1_RTSP_URL not set in .env')
+    print('[HINT] Run stream.bat first to create local RTSP stream')
+"
 
-if "%ARG1%"=="1" (
-    set "VIDEO_PATH=stream_2.mp4"
-    goto video_selected
-)
-if "%ARG1%"=="2" (
-    set "VIDEO_PATH=stream.mp4"
-    goto video_selected
-)
-if "%ARG1%"=="3" (
-    goto download_drive_video
-)
-if "%ARG1%"=="4" (
-    if not "%~2"=="" (
-        set "VIDEO_PATH=%~2"
-        goto video_selected
+echo.
+set /p "MINUTES=Run for how many minutes? (Enter = unlimited): "
+set "MAX_MINUTES="
+if "%MINUTES%" neq "" set "MAX_MINUTES=--max-minutes %MINUTES%"
+
+rem Check if preview wanted (Windows desktop)
+set "PREVIEW_FLAG=--no-preview"
+if not defined COLAB_GPU if not defined COLAB_RELEASE_TAG (
+    set /p "PREVIEW=Show preview window? [y/N]: "
+    if /i "%PREVIEW%"=="Y" if /i "%PREVIEW%"=="YES" (
+        set "PREVIEW_FLAG="
     )
 )
-if not "%ARG1%"=="" (
-    set "VIDEO_PATH=%ARG1%"
-    goto video_selected
-)
 
-:menu_video
-echo =================================================
-echo             FAST-ALPR VIDEO SOURCE MENU
-echo =================================================
-echo   1) stream_2.mp4 (repo)
-echo   2) stream.mp4 (repo)
-echo   3) Google Drive video (ID: 1szprqeBN3eQ5vBcRJ8HVIowMu514F94L)
-echo   4) Custom video path
-echo =================================================
-set /p "V_CHOICE=Choose video source [1-4] (default 1): "
-if "%V_CHOICE%"=="" set "V_CHOICE=1"
+rem Determine plate format from .env
+%VENV_PY% -c "
+import os
+from dotenv import load_dotenv
+load_dotenv('.env', override=True)
+fmt = os.environ.get('PLATE_FORMAT', 'GENERAL')
+print('PLATE_FORMAT=' + fmt)
+" > .tmp_fmt.txt
+set /p "PLATE_FMT=" < .tmp_fmt.txt
+del .tmp_fmt.txt
 
-if "%V_CHOICE%"=="1" (
-    set "VIDEO_PATH=stream_2.mp4"
-    goto video_selected
-)
-if "%V_CHOICE%"=="2" (
-    set "VIDEO_PATH=stream.mp4"
-    goto video_selected
-)
-if "%V_CHOICE%"=="3" (
-    goto download_drive_video
-)
-if "%V_CHOICE%"=="4" (
-    set /p "VIDEO_PATH=Enter custom video path: "
-    goto video_selected
-)
-
-set "VIDEO_PATH=stream_2.mp4"
-goto video_selected
-
-:download_drive_video
-if not exist "%VIDEO_DIR%" mkdir "%VIDEO_DIR%"
-set "VIDEO_PATH=%VIDEO_DIR%\drive_input.mp4"
-if not exist "%VIDEO_PATH%" (
-    echo [INFO] Downloading Google Drive video (%DRIVE_FILE_ID%)...
-    "%PYTHON%" -c "import gdown; gdown.download(id='%DRIVE_FILE_ID%', output=r'%VIDEO_PATH%', quiet=False)"
-    if %errorlevel% neq 0 (
-        echo [ERROR] Google Drive download failed.
-        exit /b 1
-    )
-)
-goto video_selected
-
-:video_selected
-if not exist "%VIDEO_PATH%" (
-    echo [ERROR] Video file not found: %VIDEO_PATH%
-    exit /b 1
-)
-
-rem 4. Plate Format Selection Menu
-set "PLATE_FORMAT=GENERAL"
-if "%ARG1%"=="1" if not "%~2"=="" set "PLATE_FORMAT=%~2" & goto run_pipeline
-if "%ARG1%"=="2" if not "%~2"=="" set "PLATE_FORMAT=%~2" & goto run_pipeline
-if "%ARG1%"=="3" if not "%~2"=="" set "PLATE_FORMAT=%~2" & goto run_pipeline
-if "%ARG1%"=="4" if not "%~3"=="" set "PLATE_FORMAT=%~3" & goto run_pipeline
-
+rem Run detection
 echo.
-echo =================================================
-echo              PLATE FORMAT MENU
-echo =================================================
-echo   1) GENERAL (Default)
-echo   2) UK
-echo   3) PAKISTAN
-echo =================================================
-set /p "F_CHOICE=Choose plate format [1-3] (default 1): "
-if "%F_CHOICE%"=="" set "F_CHOICE=1"
-
-if "%F_CHOICE%"=="1" set "PLATE_FORMAT=GENERAL"
-if "%F_CHOICE%"=="2" set "PLATE_FORMAT=UK"
-if "%F_CHOICE%"=="3" set "PLATE_FORMAT=PAKISTAN"
-
-:run_pipeline
-echo.
-echo [RUN] Source: %VIDEO_PATH%
-echo [RUN] Format: %PLATE_FORMAT%
-echo [RUN] Output Video: %OUTPUT_VIDEO%
+echo Starting detection...
+echo Command: %VENV_PY% run.py --source "%CAMERA_1_RTSP_URL%" --plate-format %PLATE_FMT:PLATE_FORMAT=% %MAX_MINUTES% %PREVIEW_FLAG%
 echo.
 
-"%PYTHON%" run.py --source "%VIDEO_PATH%" --output-video "%OUTPUT_VIDEO%" --plate-format "%PLATE_FORMAT%" --preview
-if %errorlevel% neq 0 (
-    echo.
-    echo [ERROR] Pipeline execution failed.
-    exit /b 1
-)
+%VENV_PY% run.py --source "%CAMERA_1_RTSP_URL%" --plate-format %PLATE_FMT:PLATE_FORMAT=% %MAX_MINUTES% %PREVIEW_FLAG%
 
 echo.
-echo =================================================
-echo === Run Completed Successfully ===
-echo Annotated Video: %OUTPUT_VIDEO%
-echo Events JSON    : output\events.json
-echo Snapshots      : output\snapshots
-echo =================================================
-endlocal
+echo Detection finished.
+set /p "STOP_STREAM=Stop stream processes too? [Y/n]: "
+if /i "%STOP_STREAM%" neq "N" if /i "%STOP_STREAM%" neq "NO" (
+    call stop.bat
+)
