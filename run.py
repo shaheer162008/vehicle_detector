@@ -136,6 +136,9 @@ def parse_args():
     # File loop & realtime simulation
     parser.add_argument("--loop-file", action="store_true", default=False, help="Loop video file on EOF")
     parser.add_argument("--simulate-realtime", action="store_true", default=False, help="Pace file playback at native FPS")
+    # Timer & performance
+    parser.add_argument("--max-minutes", type=float, default=0.0, help="Stop after N minutes (0 = unlimited)")
+    parser.add_argument("--perf-profile", type=str, choices=["full", "light", "auto"], default="auto", help="Performance profile: full (GPU), light (CPU), auto (detect)")
     # Service relay args
     parser.add_argument("--relay-url", type=str, default=None, help="Internal WebSocket relay URL (ws://host:port/internal/ingest/stream_id?token=...)")
     parser.add_argument("--stream-id", type=str, default=None, help="Stream ID for service relay")
@@ -193,18 +196,52 @@ def main() -> None:
                 cls, conf = pair.split(":", 1)
                 conf_per_class[cls.strip()] = float(conf.strip())
 
+    # Env defaults for source, weights, plate_format, perf_profile
+    video_source = args.source
+    vehicle_weights = args.vehicle_weights or os.environ.get("VEHICLE_WEIGHTS", "yolo11m.pt")
+    plate_format = args.plate_format or os.environ.get("PLATE_FORMAT", "GENERAL")
+    perf_profile = args.perf_profile or os.environ.get("PERF_PROFILE", "auto")
+
+    # Auto-detect GPU for perf_profile
+    if perf_profile == "auto":
+        try:
+            import torch
+            perf_profile = "full" if torch.cuda.is_available() else "light"
+        except Exception:
+            perf_profile = "light"
+    print(f"[PERF] Profile: {perf_profile}")
+
+    # Apply light profile settings (CPU-friendly)
+    alpr_interval = args.alpr_interval
+    vehicle_imgsz = 960
+    if perf_profile == "light":
+        alpr_interval = max(args.alpr_interval, 5)  # Less frequent ALPR
+        vehicle_imgsz = 640  # Smaller inference size
+        print(f"[PERF] Light profile: alpr_interval={alpr_interval}, vehicle_imgsz={vehicle_imgsz}")
+
+    # Parse ignore_classes
+    ignore_classes = [c.strip() for c in args.ignore_classes.split(",") if c.strip()] if args.ignore_classes else ["other"]
+
+    # Parse conf_per_class
+    conf_per_class = {}
+    if args.conf_per_class:
+        for pair in args.conf_per_class.split(","):
+            if ":" in pair:
+                cls, conf = pair.split(":", 1)
+                conf_per_class[cls.strip()] = float(conf.strip())
+
     config = PipelineConfig(
         camera_id=args.camera_id,
         node_id=args.node_id,
-        plate_format=args.plate_format,
+        plate_format=plate_format,
         plate_syntax_correction=args.plate_syntax_correction,
         vehicle_conf_thresh=args.vehicle_conf,
-        vehicle_weights=args.vehicle_weights,
+        vehicle_weights=vehicle_weights,
         ignore_classes=ignore_classes,
         conf_per_class=conf_per_class,
         loop_file=args.loop_file,
         simulate_realtime=args.simulate_realtime,
-        alpr_frame_interval=args.alpr_interval,
+        alpr_frame_interval=alpr_interval,
         alpr_on_crops=args.alpr_on_crops,
         min_track_frames=args.min_track_frames,
         max_disappeared_frames=args.disappeared_frames,
@@ -238,11 +275,18 @@ def main() -> None:
         roi_polygon=roi_poly,
     )
 
-    video_source = args.source
-    if args.cameras_config:
+    # Determine video source
+    if not video_source and args.cameras_config:
         config = load_camera_from_json(args.cameras_config, args.camera_id, base_config=config)
         if not video_source:
             video_source = config.rtsp_url
+
+    # Env default for camera 1 RTSP URL
+    if not video_source:
+        cam1_rtsp = os.environ.get("CAMERA_1_RTSP_URL")
+        if cam1_rtsp and cam1_rtsp.strip():
+            video_source = cam1_rtsp.strip()
+            print(f"[INPUT] Using CAMERA_1_RTSP_URL from env: {video_source}")
 
     if not video_source:
         for fallback in ("stream_2.mp4", "stream.mp4"):
@@ -255,6 +299,8 @@ def main() -> None:
             sys.exit(1)
 
     print(f"[SYSTEM] Camera: {config.camera_id} | Format: {config.plate_format} | Run: {run_id}")
+    if args.max_minutes > 0:
+        print(f"[TIMER] Will stop after {args.max_minutes} minutes")
     _check_onnx_cuda_warning()
     pipeline = VehicleALPRPipeline(
         config=config,
@@ -266,12 +312,24 @@ def main() -> None:
         preview_width=args.preview_width,
     )
 
+    # Timer for max-minutes
+    import threading
+    stop_event = threading.Event()
+    if args.max_minutes > 0:
+        def timer_stop():
+            time.sleep(args.max_minutes * 60)
+            print(f"\n[TIMER] {args.max_minutes} minutes elapsed - stopping gracefully...")
+            stop_event.set()
+        timer_thread = threading.Thread(target=timer_stop, daemon=True)
+        timer_thread.start()
+
     try:
         pipeline.process_video(
             video_source=video_source,
             output_video_path=args.output_video,
             max_frames=args.max_frames,
             start_frame=args.start_frame,
+            stop_event=stop_event,
         )
     except KeyboardInterrupt:
         print("\n[INFO] Interrupted by user. Outputs finalized.")
@@ -280,6 +338,11 @@ def main() -> None:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+    # Print final performance summary from pipeline
+    print(f"\n[PERF] Run completed: {run_id}")
+    print(f"[PERF] Camera: {config.camera_id} | Profile: {perf_profile} | Weights: {vehicle_weights}")
+    print(f"[PERF] Plate format: {plate_format} | Device: {'GPU' if perf_profile == 'full' else 'CPU'}")
 
 
 if __name__ == "__main__":

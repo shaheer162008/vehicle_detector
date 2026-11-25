@@ -604,6 +604,7 @@ class VehicleALPRPipeline:
         output_video_path: Optional[str | Path] = None,
         max_frames: Optional[int] = None,
         start_frame: int = 0,
+        stop_event: Optional[threading.Event] = None,
     ) -> list[dict]:
         """Processes video end-to-end with single-pass YOLO + ByteTrack and fan-out sinks."""
         self.initialize_models()
@@ -626,6 +627,7 @@ class VehicleALPRPipeline:
         wall_t0 = time.perf_counter()
         run_status = "done"
         completed = False
+        dropped_frames = 0
 
         # For simulate_realtime pacing
         frame_interval = 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 25.0) if getattr(self.config, "simulate_realtime", False) else 0
@@ -653,6 +655,10 @@ class VehicleALPRPipeline:
             dropped_frames = 0
             is_rtsp = isinstance(video_source, str) and video_source.startswith(("rtsp://", "http://", "https://", "rtsps://"))
             while cap.isOpened():
+                # Check stop_event (for --max-minutes timer)
+                if stop_event and stop_event.is_set():
+                    print("[TIMER] Stop event received, breaking loop...")
+                    break
                 if max_frames and frame_idx >= max_frames:
                     break
 
@@ -831,6 +837,40 @@ class VehicleALPRPipeline:
         )
         print(self.event_bus.get_status_str())
         self.event_bus.close_db()
+        # Calculate per-stage p50/p95 (approximate from total time / frames)
+        if frame_idx > 0:
+            avg_detect = (prof['detect'] / frame_idx) * 1000  # ms per frame
+            avg_track = (prof['track'] / frame_idx) * 1000
+            avg_alpr = (prof['alpr'] / frame_idx) * 1000
+            avg_render = (prof['render'] / frame_idx) * 1000
+        else:
+            avg_detect = avg_track = avg_alpr = avg_render = 0.0
+
+        # CPU/GPU stats
+        cpu_percent = "n/a"
+        gpu_util = "n/a"
+        vram_mb = "n/a"
+        try:
+            import psutil
+            cpu_percent = f"{psutil.cpu_percent(interval=None):.1f}%"
+        except Exception:
+            pass
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split(", ")
+                if len(parts) == 2:
+                    gpu_util = f"{parts[0]}%"
+                    vram_mb = f"{int(parts[1])} MB"
+        except Exception:
+            pass
+
+        device_str = "GPU" if self.has_cuda else "CPU"
+
         print(
             f"\n[SUMMARY] frames={frame_idx} time={wall_s:.2f}s ({frame_idx/max(1e-5,wall_s):.1f} FPS) | "
             f"tracks_seen={self.tracker_manager.total_tracks_seen} "
@@ -840,8 +880,10 @@ class VehicleALPRPipeline:
             f"dropped_frames={dropped_frames}"
         )
         print(
-            f"[PROFILE] detect={prof['detect']:.1f}s | track={prof['track']:.1f}s | "
-            f"alpr={prof['alpr']:.1f}s | render={prof['render']:.1f}s"
+            f"[PERF] avg_ms/frame: detect={avg_detect:.1f} track={avg_track:.1f} alpr={avg_alpr:.1f} render={avg_render:.1f}"
+        )
+        print(
+            f"[PERF] cpu={cpu_percent} gpu_util={gpu_util} vram={vram_mb} device={device_str}"
         )
         for m in self.tracker_manager.emitted_events_meta:
             plate = m["plate_text"] or "NO PLATE"
