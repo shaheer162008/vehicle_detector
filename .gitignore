@@ -230,6 +230,7 @@ output_prev_*/
 frame_test.png
 
 # Secrets & local env
+.env
 .env.local
 .env.*.local
 .env.*
