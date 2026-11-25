@@ -284,8 +284,12 @@ class VehicleALPRPipeline:
         if self.vehicle_model is None:
             from ultralytics import YOLO
 
-            print(f"[LOAD] Vehicle YOLO: {self.config.vehicle_model_name}")
-            self.vehicle_model = YOLO(self.config.vehicle_model_name)
+            model_path = getattr(self.config, "vehicle_weights", self.config.vehicle_model_name)
+            print(f"[LOAD] Vehicle YOLO: {model_path}")
+            self.vehicle_model = YOLO(model_path)
+            # Build class name mapping
+            self.vehicle_class_names = self.vehicle_model.names if hasattr(self.vehicle_model, "names") else {}
+            self._build_vehicle_type_map()
 
         if self.alpr is None:
             print(f"[LOAD] FastALPR ({self.config.alpr_detector_model} + {self.config.alpr_ocr_model})")
@@ -308,6 +312,75 @@ class VehicleALPRPipeline:
                     ocr_model=self.config.alpr_ocr_model,
                     ocr_device="cuda" if self.has_cuda else "auto",
                 )
+
+    def _build_vehicle_type_map(self) -> None:
+        """Maps model class IDs to allowed vehicle_type values."""
+        # Allowed vehicle_type values
+        self.allowed_vehicle_types = {"car", "rickshaw", "htv", "van", "pickup", "bike"}
+        self.ignore_classes = set(getattr(self.config, "ignore_classes", ["other"]))
+        self.conf_per_class = getattr(self.config, "conf_per_class", {})
+
+        # COCO class ID mapping (car=2, motorcycle=3, bus=5, truck=7)
+        self.coco_to_type = {2: "car", 3: "bike", 5: "htv", 7: "htv"}
+
+        # Determine if using COCO weights (80 classes, standard names)
+        self.is_coco_model = len(self.vehicle_class_names) == 80 and all(
+            isinstance(k, int) for k in self.vehicle_class_names.keys()
+        )
+
+        if self.is_coco_model:
+            print("[VEHICLE TYPE] COCO model detected - using hardcoded mapping for classes 2,3,5,7")
+        else:
+            print(f"[VEHICLE TYPE] Custom model with {len(self.vehicle_class_names)} classes: {list(self.vehicle_class_names.values())}")
+
+    def _resolve_vehicle_type(self, class_id: int, conf: float) -> Optional[str]:
+        """Resolves class ID to vehicle_type, applying ignore list and conf overrides."""
+        if self.is_coco_model:
+            # COCO model: only allow classes 2,3,5,7
+            if class_id not in self.coco_to_type:
+                return None
+            vtype = self.coco_to_type[class_id]
+        else:
+            # Custom model: use model's class names
+            class_name = self.vehicle_class_names.get(class_id, "").lower()
+            if not class_name:
+                return None
+            # Map common synonyms
+            synonyms = {
+                "motorcycle": "bike",
+                "motorbike": "bike",
+                "bicycle": "bike",
+                "truck": "htv",
+                "lorry": "htv",
+                "bus": "htv",
+                "coach": "htv",
+                "van": "van",
+                "minivan": "van",
+                "pickup": "pickup",
+                "rickshaw": "rickshaw",
+                "auto": "rickshaw",
+                "tuk-tuk": "rickshaw",
+                "tuktuk": "rickshaw",
+                "car": "car",
+                "sedan": "car",
+                "suv": "car",
+                "hatchback": "car",
+            }
+            vtype = synonyms.get(class_name, class_name)
+
+        # Check ignore list
+        if vtype in self.ignore_classes:
+            return None
+
+        # Check per-class confidence override
+        if vtype in self.conf_per_class and conf < self.conf_per_class[vtype]:
+            return None
+
+        # Validate against allowed types
+        if vtype not in self.allowed_vehicle_types:
+            return None
+
+        return vtype
 
     def _open_capture(self, video_source: str | int | Path, start_frame: int) -> cv2.VideoCapture:
         src_str = str(video_source)
@@ -543,9 +616,11 @@ class VehicleALPRPipeline:
 
                 # 1. Single-pass Vehicle Detection
                 t0 = time.perf_counter()
+                # Use vehicle_classes from config for COCO, or all classes for custom model
+                det_classes = self.config.vehicle_classes if self.is_coco_model else None
                 det_res = self.vehicle_model.predict(
                     source=frame,
-                    classes=self.config.vehicle_classes,
+                    classes=det_classes,
                     conf=self.config.vehicle_conf_thresh,
                     imgsz=self.config.vehicle_imgsz,
                     verbose=False,
@@ -558,6 +633,8 @@ class VehicleALPRPipeline:
                 if det_res and det_res[0].boxes is not None:
                     boxes_obj = det_res[0].boxes
                     raw_xyxys = boxes_obj.xyxy.cpu().tolist()
+                    raw_cls = boxes_obj.cls.cpu().tolist() if boxes_obj.cls is not None else []
+                    raw_conf = boxes_obj.conf.cpu().tolist() if boxes_obj.conf is not None else []
                     tracks = self.byte_tracker.update(boxes_obj.cpu().numpy(), frame)
 
                     if len(tracks) > 0:
@@ -572,8 +649,17 @@ class VehicleALPRPipeline:
                                 t_id = int(row[4])
                                 det_idx = int(row[7]) if len(row) > 7 else -1
                                 r_box = raw_xyxys[det_idx] if 0 <= det_idx < len(raw_xyxys) else k_box
-                                active_ids.add(t_id)
-                                self.tracker_manager.update_track(t_id, k_box, frame, frame_idx, raw_det_box=r_box)
+
+                                # Resolve vehicle type for this detection
+                                vehicle_type = None
+                                if 0 <= det_idx < len(raw_cls):
+                                    cls_id = int(raw_cls[det_idx])
+                                    det_conf = float(raw_conf[det_idx]) if det_idx < len(raw_conf) else self.config.vehicle_conf_thresh
+                                    vehicle_type = self._resolve_vehicle_type(cls_id, det_conf)
+
+                                if vehicle_type is not None:
+                                    active_ids.add(t_id)
+                                    self.tracker_manager.update_track(t_id, k_box, frame, frame_idx, raw_det_box=r_box, vehicle_type=vehicle_type, det_conf=det_conf)
 
                 self.tracker_manager.mark_disappeared_tracks(active_ids)
                 prof["track"] += time.perf_counter() - t0
@@ -695,9 +781,9 @@ class VehicleALPRPipeline:
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 140, 255), 2)
 
             label = (
-                f"{track.global_id} | {track.best_plate_text} ({(track.best_plate_conf or 0.0) * 100:.0f}%)"
+                f"{track.global_id} | {track.vehicle_type or 'car'} | {track.best_plate_text} ({(track.best_plate_conf or 0.0) * 100:.0f}%)"
                 if track.best_plate_text
-                else f"{track.global_id} | NO PLATE"
+                else f"{track.global_id} | {track.vehicle_type or 'car'} | NO PLATE"
             )
             (tw, th), base = cv2.getTextSize(label, font, 0.55, 2)
             ly = max(th + 5, y1 - 4)

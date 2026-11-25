@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 
 try:
     from dotenv import load_dotenv
@@ -34,6 +34,12 @@ class PipelineConfig:
     vehicle_imgsz: int = 960
     vehicle_half_precision: bool = True
     vehicle_classes: List[int] = field(default_factory=lambda: [2, 3, 5, 7])  # car, motorcycle, bus, truck
+
+    # Vehicle Type Classification
+    vehicle_weights: str = "yolo11m.pt"  # custom model with class names
+    ignore_classes: List[str] = field(default_factory=lambda: ["other"])  # class names to drop
+    conf_per_class: Dict[str, float] = field(default_factory=dict)  # optional per-class conf override
+
     tracker_config: str = "custom_bytetrack.yaml"
 
     max_spatial_jump_px: float = 140.0

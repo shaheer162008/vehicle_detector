@@ -46,11 +46,12 @@ INSERT INTO events (
     plate_detection_confidence,
     number_plate,
     number_plate_confidence,
+    vehicle_type,
     run_id,
     s3_bucket,
     vehicle_key,
     plate_key
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_id) DO NOTHING;
 """
 
@@ -361,6 +362,7 @@ class PostgresSink:
             event.get("plate_detection_confidence"),
             event.get("number_plate"),
             event.get("number_plate_confidence"),
+            event.get("vehicle_type", "car"),
             event.get("run_id"),
             event.get("s3_bucket"),
             event.get("vehicle_key"),

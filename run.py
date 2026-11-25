@@ -97,6 +97,9 @@ def parse_args():
     parser.add_argument("--plate-syntax-correction", action="store_true", default=False)
     parser.add_argument("--output-video", type=str, default="output/annotated_output.mp4")
     parser.add_argument("--vehicle-conf", type=float, default=0.30)
+    parser.add_argument("--vehicle-weights", type=str, default="yolo11m.pt", help="Vehicle detection model (custom .pt or .engine)")
+    parser.add_argument("--ignore-classes", type=str, default="other", help="Comma-separated class names to ignore (default: 'other')")
+    parser.add_argument("--conf-per-class", type=str, default="", help="Optional per-class conf overrides, e.g. 'car:0.25,truck:0.35'")
     parser.add_argument("--alpr-interval", type=int, default=3)
     parser.add_argument("--alpr-on-crops", action="store_true", default=True)
     parser.add_argument("--full-frame-alpr", dest="alpr_on_crops", action="store_false")
@@ -130,6 +133,11 @@ def parse_args():
     parser.add_argument("--roi", type=str, default=None, help="JSON polygon ROI coordinates.")
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--start-frame", type=int, default=0)
+    # Service relay args
+    parser.add_argument("--relay-url", type=str, default=None, help="Internal WebSocket relay URL (ws://host:port/internal/ingest/stream_id?token=...)")
+    parser.add_argument("--stream-id", type=str, default=None, help="Stream ID for service relay")
+    parser.add_argument("--preview-fps", type=int, default=10, help="Preview frame rate for relay (default: 10)")
+    parser.add_argument("--preview-width", type=int, default=640, help="Preview frame width for relay (default: 640)")
     return parser.parse_args()
 
 
@@ -171,12 +179,26 @@ def main() -> None:
 
     run_id = _dt.now().strftime("%Y%m%d-%H%M%S")
 
+    # Parse ignore_classes
+    ignore_classes = [c.strip() for c in args.ignore_classes.split(",") if c.strip()] if args.ignore_classes else ["other"]
+
+    # Parse conf_per_class
+    conf_per_class = {}
+    if args.conf_per_class:
+        for pair in args.conf_per_class.split(","):
+            if ":" in pair:
+                cls, conf = pair.split(":", 1)
+                conf_per_class[cls.strip()] = float(conf.strip())
+
     config = PipelineConfig(
         camera_id=args.camera_id,
         node_id=args.node_id,
         plate_format=args.plate_format,
         plate_syntax_correction=args.plate_syntax_correction,
         vehicle_conf_thresh=args.vehicle_conf,
+        vehicle_weights=args.vehicle_weights,
+        ignore_classes=ignore_classes,
+        conf_per_class=conf_per_class,
         alpr_frame_interval=args.alpr_interval,
         alpr_on_crops=args.alpr_on_crops,
         min_track_frames=args.min_track_frames,

@@ -288,6 +288,10 @@ class TrackState:
     best_plate_conf: Optional[float] = None
     best_plate_det_conf: Optional[float] = None
 
+    # Vehicle type classification (conf-weighted voting)
+    class_votes: Dict[str, float] = field(default_factory=dict)
+    vehicle_type: str = ""
+
     # Lifecycle & visualization
     has_event_emitted: bool = False
     plate_confident_reached: bool = False
@@ -367,6 +371,8 @@ class VehicleTrackerManager:
         frame: np.ndarray,
         frame_idx: int,
         raw_det_box: Optional[List[float]] = None,
+        vehicle_type: Optional[str] = None,
+        det_conf: float = 0.0,
     ) -> TrackState:
         """Creates or updates track state, snapshot candidates, and border completeness."""
         kalman_box = [float(v) for v in box]
@@ -435,6 +441,13 @@ class VehicleTrackerManager:
         else:
             track = self.tracks[track_id]
             track.kalman_box = kalman_box
+
+        # Vehicle type voting (conf-weighted)
+        if vehicle_type:
+            track.class_votes[vehicle_type] = track.class_votes.get(vehicle_type, 0.0) + det_conf
+            # Update vehicle_type to current winner
+            if track.class_votes:
+                track.vehicle_type = max(track.class_votes, key=track.class_votes.get)
 
             # Spatial jump guard: never wipe a locked plate or border-clipping box shifts
             if track.last_center is not None and track.frames_tracked > 2 and not track.plate_confident_reached:
@@ -840,6 +853,12 @@ class VehicleTrackerManager:
         if absorbed.plate_confident_reached:
             survivor.plate_confident_reached = True
 
+        # Merge vehicle type votes (conf-weighted)
+        for vtype, vote in absorbed.class_votes.items():
+            survivor.class_votes[vtype] = survivor.class_votes.get(vtype, 0.0) + vote
+        if survivor.class_votes:
+            survivor.vehicle_type = max(survivor.class_votes, key=survivor.class_votes.get)
+
         comb_sharp = max(survivor.max_sharpness, absorbed.max_sharpness)
         survivor.max_sharpness = comb_sharp
         score_surv = survivor.best_unnorm_score / max(1e-5, comb_sharp)
@@ -1100,6 +1119,7 @@ class VehicleTrackerManager:
                 if has_plate and track.best_plate_conf is not None
                 else None
             ),
+            "vehicle_type": track.vehicle_type or "car",  # Always present, default to "car"
         }
 
         if self.config.include_remarks:

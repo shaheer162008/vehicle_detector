@@ -135,7 +135,7 @@ def main() -> int:
                 for ev in events:
                     eid = ev.get("event_id")
                     cur.execute(
-                        "SELECT event_id, run_id, s3_bucket, vehicle_key, plate_key, number_plate "
+                        "SELECT event_id, run_id, s3_bucket, vehicle_key, plate_key, number_plate, vehicle_type "
                         "FROM events WHERE event_id = %s;",
                         (eid,),
                     )
@@ -144,10 +144,14 @@ def main() -> int:
                         mismatches.append(f"{eid}: DB row missing")
                         continue
 
-                    _, row_run_id, row_bucket, vehicle_key, plate_key, db_plate = row
+                    _, row_run_id, row_bucket, vehicle_key, plate_key, db_plate, db_vehicle_type = row
                     if row_run_id:
                         found_run_ids.add(row_run_id)
                     bucket = row_bucket or default_bucket
+
+                    # Check vehicle_type NOT NULL
+                    if not db_vehicle_type:
+                        mismatches.append(f"{eid}: DB vehicle_type is NULL/empty")
 
                     # Check (2): vehicle_key in DB & S3
                     if not vehicle_key:

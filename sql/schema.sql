@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS events (
   plate_detection_confidence  REAL,
   number_plate                TEXT,
   number_plate_confidence     REAL,
+  vehicle_type                TEXT        NOT NULL DEFAULT 'car',
   analysis_status             TEXT        NOT NULL DEFAULT 'pending',
   analysis                    JSONB,
   analysis_updated_at         TIMESTAMPTZ,
@@ -71,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_events_cam_time     ON events (camera_id, event_t
 CREATE INDEX IF NOT EXISTS idx_events_plate        ON events (number_plate) WHERE number_plate IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_pending      ON events (analysis_status) WHERE analysis_status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_events_run          ON events (run_id)         WHERE run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_vehicle_type ON events (vehicle_type);
 
 -- 5. Dashboard convenience view
 CREATE OR REPLACE VIEW v_latest_events AS
@@ -84,6 +86,7 @@ SELECT
   e.number_plate,
   e.number_plate_confidence,
   e.plate_detection_confidence,
+  e.vehicle_type,
   e.snapshot_vehicle,
   e.snapshot_number_plate,
   e.vehicle_key,

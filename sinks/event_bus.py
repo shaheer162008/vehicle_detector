@@ -285,6 +285,7 @@ class EventBus:
             "plate_detection_confidence",
             "number_plate",
             "number_plate_confidence",
+            "vehicle_type",
             "remarks",
         )
         return {k: event[k] for k in allowed if k in event}
