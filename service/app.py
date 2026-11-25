@@ -397,6 +397,33 @@ async def get_stream_status(
     return status
 
 
+@app.get("/cameras")
+async def list_cameras(
+    mgr: StreamManager = Depends(get_manager),
+    _: None = Depends(verify_api_key),
+) -> List[Dict[str, Any]]:
+    """List all configured cameras (from cameras.json + env overrides) with masked RTSP URLs."""
+    cameras = []
+    for i in range(1, 41):
+        cam_id = f"CAM-{i:05d}"
+        rtsp_url = os.environ.get(f"CAMERA_{i}_RTSP_URL", "")
+        name = os.environ.get(f"CAMERA_{i}_NAME", f"Camera {i}")
+        location = os.environ.get(f"CAMERA_{i}_LOCATION", "")
+        if rtsp_url:
+            # Mask password in URL for display
+            masked_url = re.sub(r"(rtsp://[^:]+:)[^@]+@", r"\1****@", rtsp_url)
+        else:
+            masked_url = "not configured"
+        cameras.append({
+            "camera_id": cam_id,
+            "name": name,
+            "location": location,
+            "rtsp_url": masked_url,
+            "configured": bool(rtsp_url),
+        })
+    return cameras
+
+
 @app.get("/videos", response_model=List[str])
 async def list_videos(
     mgr: StreamManager = Depends(get_manager),

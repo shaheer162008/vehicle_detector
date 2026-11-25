@@ -103,6 +103,35 @@ curl -X POST localhost:8000/streams -H "X-API-KEY: $SERVICE_TOKEN" \
 python tools/benchmark.py --source stream_2.mp4 --seconds 60
 ```
 
+## Multi-Camera Support (Up to 40)
+
+The system is designed for up to 40 cameras. Camera configurations are loaded from `cameras.json` (40-camera template) and can be overridden via environment variables:
+
+- `CAMERA_1_RTSP_URL`, `CAMERA_1_NAME`, `CAMERA_1_LOCATION`
+- ... up to `CAMERA_40_RTSP_URL`, `CAMERA_40_NAME`, `CAMERA_40_LOCATION`
+
+API endpoint: `GET /cameras` (requires `X-API-KEY`) returns all configured cameras with masked RTSP URLs.
+
+**Note:** VRAM/CPU limits for 40 simultaneous streams depend on hardware. Benchmark with your target resolution/FPS before deploying all 40. Typical GPU (RTX 5060 8GB / Colab T4 16GB) handles 4-8 concurrent streams at 1080p. Scale horizontally (multiple nodes) for 40 cameras.
+
+## Colab / Headless Usage
+
+In Google Colab (or any headless environment), scripts adapt automatically:
+
+- `setup.sh` skips virtual environment creation, uses system Python
+- `stream.sh` runs MediaMTX/ffmpeg in background with logs to `logs/`
+- `run.sh` defaults to `--no-preview`, sends data to Neon/S3
+- No WebSocket tunneling needed - frontend reads from Neon separately
+
+```bash
+# Colab one-liner
+!git clone -b release-v1 https://github.com/shaheer162008/vehicle_detector.git
+%cd vehicle_detector
+!bash setup.sh
+# Edit .env with your Neon creds
+!python run.py --source stream_2.mp4 --plate-format GENERAL --no-preview
+```
+
 ## License
 
 Built on [FastALPR](https://github.com/ankandrew/fast-alpr) (MIT). Vehicle detection uses Ultralytics YOLO (AGPL-3.0).
