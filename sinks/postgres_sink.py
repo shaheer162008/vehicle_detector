@@ -379,6 +379,10 @@ class PostgresSink:
                 try:
                     with self._conn.cursor() as cur:
                         cur.execute(_INSERT_EVENT_SQL, params)
+                        if cur.rowcount == 0:
+                            print(f"[ID-COLLISION] Event {event.get('event_id')} already exists in DB (ON CONFLICT DO NOTHING)")
+                            # Route to outbox so event is not silently dropped
+                            return False
                     return True
                 except Exception:
                     try:
@@ -390,6 +394,9 @@ class PostgresSink:
                         raise
                     with self._conn.cursor() as cur:
                         cur.execute(_INSERT_EVENT_SQL, params)
+                        if cur.rowcount == 0:
+                            print(f"[ID-COLLISION] Event {event.get('event_id')} already exists in DB (ON CONFLICT DO NOTHING)")
+                            return False
                     return True
         except Exception as e:
             print(f"[POSTGRES ERROR] Failed to insert event {event.get('event_id')}: {e}")

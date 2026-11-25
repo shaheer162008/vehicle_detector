@@ -20,7 +20,27 @@ import numpy as np
 
 from config import PipelineConfig
 
+# Crockford base32 alphabet (excludes I, L, O, U for readability)
+CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# Event ID date format (configurable)
+EVENT_ID_DATE_FMT = "%Y%m%d"
+
+
+def _generate_random_base32(length: int = 8) -> str:
+    """Generate random string using Crockford base32 via secrets module."""
+    import secrets
+    return "".join(secrets.choice(CROCKFORD_BASE32) for _ in range(length))
+
+
+def generate_event_id(camera_id_str: str, now: datetime) -> str:
+    """Generates unique event ID: {YYYYMMDD}_{XXXXXXXX} (Crockford base32).
+    Format: 20261126_K7Q2X9PM
+    """
+    date_part = now.strftime(EVENT_ID_DATE_FMT)
+    random_part = _generate_random_base32(8)
+    return f"{date_part}_{random_part}"
 
 
 class AsyncSnapshotSaver:
@@ -70,16 +90,6 @@ def levenshtein_distance(s1: str, s2: str, wildcard: Optional[str] = None) -> in
             curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if same else 1)))
         prev = curr
     return prev[-1]
-
-
-def generate_infinite_event_id(node_id: str, camera_id_str: str, now: datetime, seq_idx: int = 0) -> str:
-    """Generates unique event ID: {NODE}{CAM}-{YYMMDD}{HHMMSS}-{SEQ}."""
-    match = re.search(r"\d+", str(camera_id_str))
-    cam_int = int(match.group(0)) if match else 1
-    cam_str = f"{cam_int:03d}" if cam_int > 99 else f"{cam_int:02d}"
-    n = seq_idx % 1296
-    seq_str = BASE36_ALPHABET[n // 36] + BASE36_ALPHABET[n % 36]
-    return f"{node_id}{cam_str}-{now.strftime('%y%m%d%H%M%S')}-{seq_str}"
 
 
 def get_image_sharpness(img: Optional[np.ndarray]) -> float:
@@ -329,6 +339,7 @@ class VehicleTrackerManager:
         self.event_counter: int = 0
         self._last_sec_key: Optional[str] = None
         self._sec_seq_counter: int = 0
+        self._used_event_ids: Set[str] = set()  # Process-level event_id uniqueness
 
         self.snapshot_saver = AsyncSnapshotSaver()
 
@@ -1056,12 +1067,13 @@ class VehicleTrackerManager:
                         self.finalize_track_plate_reads(track)
                         return None
 
-        sec_key = now.strftime("%y%m%d%H%M%S")
-        self._sec_seq_counter = (self._sec_seq_counter + 1) if sec_key == self._last_sec_key else 0
-        self._last_sec_key = sec_key
-
         self.event_counter += 1
-        event_id = generate_infinite_event_id(self.config.node_id, self.config.camera_id, now, self._sec_seq_counter)
+        # Generate unique event_id with collision handling
+        event_id = generate_event_id(self.config.camera_id, now)
+        while event_id in self._used_event_ids:
+            print(f"[ID-COLLISION] Regenerating event_id for {self.config.camera_id}")
+            event_id = generate_event_id(self.config.camera_id, now)
+        self._used_event_ids.add(event_id)
         track.emitted_event_id = event_id
         if has_plate and track.best_plate_text:
             self.recent_emitted_plates[track.best_plate_text] = (current_timestamp, event_id)
