@@ -133,6 +133,9 @@ def parse_args():
     parser.add_argument("--roi", type=str, default=None, help="JSON polygon ROI coordinates.")
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--start-frame", type=int, default=0)
+    # File loop & realtime simulation
+    parser.add_argument("--loop-file", action="store_true", default=False, help="Loop video file on EOF")
+    parser.add_argument("--simulate-realtime", action="store_true", default=False, help="Pace file playback at native FPS")
     # Service relay args
     parser.add_argument("--relay-url", type=str, default=None, help="Internal WebSocket relay URL (ws://host:port/internal/ingest/stream_id?token=...)")
     parser.add_argument("--stream-id", type=str, default=None, help="Stream ID for service relay")
@@ -199,6 +202,8 @@ def main() -> None:
         vehicle_weights=args.vehicle_weights,
         ignore_classes=ignore_classes,
         conf_per_class=conf_per_class,
+        loop_file=args.loop_file,
+        simulate_realtime=args.simulate_realtime,
         alpr_frame_interval=args.alpr_interval,
         alpr_on_crops=args.alpr_on_crops,
         min_track_frames=args.min_track_frames,
@@ -251,7 +256,15 @@ def main() -> None:
 
     print(f"[SYSTEM] Camera: {config.camera_id} | Format: {config.plate_format} | Run: {run_id}")
     _check_onnx_cuda_warning()
-    pipeline = VehicleALPRPipeline(config=config, run_id=run_id, video_source=video_source)
+    pipeline = VehicleALPRPipeline(
+        config=config,
+        run_id=run_id,
+        video_source=video_source,
+        relay_url=args.relay_url,
+        stream_id=args.stream_id,
+        preview_fps=args.preview_fps,
+        preview_width=args.preview_width,
+    )
 
     try:
         pipeline.process_video(

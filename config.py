@@ -40,6 +40,10 @@ class PipelineConfig:
     ignore_classes: List[str] = field(default_factory=lambda: ["other"])  # class names to drop
     conf_per_class: Dict[str, float] = field(default_factory=dict)  # optional per-class conf override
 
+    # File input options
+    loop_file: bool = False
+    simulate_realtime: bool = False
+
     tracker_config: str = "custom_bytetrack.yaml"
 
     max_spatial_jump_px: float = 140.0

@@ -186,14 +186,23 @@ class VehicleALPRPipeline:
         config: Optional[PipelineConfig] = None,
         run_id: Optional[str] = None,
         video_source: Optional[str] = None,
+        relay_url: Optional[str] = None,
+        stream_id: Optional[str] = None,
+        preview_fps: int = 10,
+        preview_width: int = 640,
     ):
         self.config = config or PipelineConfig()
         self.run_id = run_id or getattr(self.config, "run_id", "") or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.video_source = video_source
+        self.relay_url = relay_url
+        self.stream_id = stream_id
+        self.preview_fps = preview_fps
+        self.preview_width = preview_width
         self.vehicle_model = None
         self.alpr = None
         self.byte_tracker = None
         self.has_cuda = False
+        self.relay_sink = None
 
         from sinks import EventBus
         self.event_bus = EventBus(
@@ -215,6 +224,21 @@ class VehicleALPRPipeline:
         )
         self.tracker_manager = VehicleTrackerManager(self.config, event_bus=self.event_bus)
         self.preview_worker: Optional[ColabLivePreviewWorker | DesktopPreviewWorker] = None
+
+        # Initialize relay sink if URL provided
+        if self.relay_url and self.stream_id:
+            try:
+                from service.relay import RelaySink
+                self.relay_sink = RelaySink(
+                    relay_url=self.relay_url,
+                    stream_id=self.stream_id,
+                    preview_fps=self.preview_fps,
+                    preview_width=self.preview_width,
+                )
+                self.relay_sink.start()
+                print(f"[RELAY] Started relay to {self.relay_url}")
+            except Exception as e:
+                print(f"[RELAY] Failed to start: {e}")
 
     def _extract_ocr_confidences(self, ocr_item, plate_crop: np.ndarray, frame_idx: int) -> Tuple[str, float, List[float]]:
         """Extracts raw text, mean OCR confidence, and per-character confidences."""
@@ -386,8 +410,13 @@ class VehicleALPRPipeline:
         src_str = str(video_source)
         if isinstance(video_source, int) or src_str.isdigit():
             cap = cv2.VideoCapture(int(video_source))
-        elif src_str.startswith(("rtsp://", "http://", "https://", "rtsps://")):
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        elif src_str.startswith(("rtsp://", "rtsps://")):
+            # RTSP with TCP transport, low delay, no buffer
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+            cap = cv2.VideoCapture(src_str, cv2.CAP_FFMPEG)
+        elif src_str.startswith(("http://", "https://")):
+            # HTTP streams (MJPEG, HLS, etc.) - use FFMPEG backend
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay"
             cap = cv2.VideoCapture(src_str, cv2.CAP_FFMPEG)
         else:
             video_path = Path(video_source)
@@ -400,6 +429,22 @@ class VehicleALPRPipeline:
         if start_frame > 0 and not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
             print(f"[INPUT WARNING] Could not seek to frame {start_frame}.")
         return cap
+
+    def _reconnect_rtsp(self, video_source: str, max_retries: int = 10) -> Optional[cv2.VideoCapture]:
+        """Reconnect to RTSP/HTTP stream with exponential backoff."""
+        backoff = 1.0
+        max_backoff = 30.0
+        for attempt in range(max_retries):
+            print(f"[STREAM] Reconnecting attempt {attempt + 1}/{max_retries} (backoff {backoff:.1f}s)...")
+            time.sleep(backoff)
+            cap = self._open_capture(video_source, 0)
+            if cap.isOpened():
+                print(f"[STREAM] Reconnected successfully")
+                # Flush tracker on reconnect
+                self.tracker_manager.check_and_emit_events(0, force_all=True)
+                return cap
+            backoff = min(backoff * 2, max_backoff)
+        return None
 
     def _start_preview_worker(self) -> None:
         if not self.config.show_preview:
@@ -582,6 +627,10 @@ class VehicleALPRPipeline:
         run_status = "done"
         completed = False
 
+        # For simulate_realtime pacing
+        frame_interval = 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 25.0) if getattr(self.config, "simulate_realtime", False) else 0
+        last_frame_time = time.perf_counter()
+
         try:
             cap = self._open_capture(video_source, start_frame)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -600,11 +649,40 @@ class VehicleALPRPipeline:
             print(f"[PROCESS] {width}x{height} @ {fps:.1f} FPS | {total_frames} frames ({expected_duration:.2f}s)")
 
             rolling_fps, fps_t0, fps_cnt = fps, time.time(), 0
+            loop_count = 0
+            dropped_frames = 0
+            is_rtsp = isinstance(video_source, str) and video_source.startswith(("rtsp://", "http://", "https://", "rtsps://"))
             while cap.isOpened():
                 if max_frames and frame_idx >= max_frames:
                     break
+
+                # Handle simulate_realtime pacing
+                if frame_interval > 0:
+                    elapsed = time.perf_counter() - last_frame_time
+                    if elapsed < frame_interval:
+                        time.sleep(frame_interval - elapsed)
+                    last_frame_time = time.perf_counter()
+
                 ret, frame = cap.read()
                 if not ret or frame is None:
+                    # Handle RTSP reconnection
+                    if is_rtsp:
+                        print(f"[RTSP] Read failed, attempting reconnect...")
+                        cap.release()
+                        cap = self._reconnect_rtsp(str(video_source))
+                        if cap is None:
+                            print(f"[RTSP] Reconnection failed after max retries")
+                            break
+                        continue
+                    # Handle file loop
+                    elif getattr(self.config, "loop_file", False):
+                        print(f"[LOOP] End of file reached, looping (loop {loop_count + 1})")
+                        loop_count += 1
+                        # Force emit any pending events before loop restarts
+                        self.tracker_manager.check_and_emit_events(frame_idx, force_all=True)
+                        # Seek to start
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
                     break
                 frame_idx += 1
                 fps_cnt += 1
@@ -671,11 +749,16 @@ class VehicleALPRPipeline:
                 prof["alpr"] += time.perf_counter() - t0
 
                 # 4. Event emission
-                self.tracker_manager.check_and_emit_events(frame_idx)
+                emitted_events = self.tracker_manager.check_and_emit_events(frame_idx)
+                # Relay events to service
+                if self.relay_sink and emitted_events:
+                    for event in emitted_events:
+                        self.relay_sink.publish_event(event)
 
                 # 5. Render & write video / preview
                 t0 = time.perf_counter()
-                if self.config.save_video or self.config.show_preview:
+                annotated = None
+                if self.config.save_video or self.config.show_preview or self.relay_sink:
                     annotated = self._render_frame(frame, live_fps=rolling_fps)
                     if writer is not None:
                         writer.write(annotated)
@@ -685,6 +768,9 @@ class VehicleALPRPipeline:
                         if getattr(self.preview_worker, "user_closed", False):
                             print("[INFO] Preview closed by user.")
                             break
+                    # Relay frame to service
+                    if self.relay_sink and annotated is not None:
+                        self.relay_sink.publish_frame(annotated)
                 prof["render"] += time.perf_counter() - t0
 
                 if frame_idx % 60 == 0 or frame_idx == 1:
@@ -702,6 +788,8 @@ class VehicleALPRPipeline:
                 cap.release()
             if self.preview_worker is not None:
                 self.preview_worker.stop()
+            if self.relay_sink:
+                self.relay_sink.stop()
             self.tracker_manager.check_and_emit_events(frame_idx, force_all=True)
             if writer is not None:
                 writer.release()
@@ -748,7 +836,8 @@ class VehicleALPRPipeline:
             f"tracks_seen={self.tracker_manager.total_tracks_seen} "
             f"events_emitted={len(self.tracker_manager.emitted_events)} "
             f"stitched={self.tracker_manager.total_tracks_stitched} "
-            f"dropped={self.tracker_manager.total_tracks_dropped}"
+            f"dropped={self.tracker_manager.total_tracks_dropped} "
+            f"dropped_frames={dropped_frames}"
         )
         print(
             f"[PROFILE] detect={prof['detect']:.1f}s | track={prof['track']:.1f}s | "
