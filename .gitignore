@@ -228,3 +228,22 @@ output_prev_*/
 *.onnx
 *.bak*
 frame_test.png
+
+# Secrets & local env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+
+# Model weights (large binaries)
+weights/*.pt
+weights/*.engine
+weights/*.onnx
+
+# Service config (per-deployment)
+service/streams.json
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
